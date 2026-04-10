@@ -2,6 +2,7 @@
 members = [
     "crates/hom-core",
     "crates/hom-mcp",
+    "crates/hom-web",
     "crates/hom-terminal",
     "crates/hom-pty",
     "crates/hom-adapters",
@@ -32,6 +33,7 @@ hom-workflow = { path = "crates/hom-workflow" }
 hom-tui = { path = "crates/hom-tui" }
 hom-db = { path = "crates/hom-db" }
 hom-mcp = { path = "crates/hom-mcp" }
+hom-web = { path = "crates/hom-web" }
 
 # Terminal emulation
 libghostty-vt = "0.1.1"
@@ -60,6 +62,11 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
 # HTTP client (OpenCode sideband) — use rustls to avoid native OpenSSL dep
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+# Web server (hom-web)
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # Configuration
 toml = "1.1"
