@@ -14,6 +14,7 @@ hom-adapters.workspace = true
 hom-workflow.workspace = true
 hom-db.workspace = true
 hom-web.workspace = true
+hom-plugin.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true

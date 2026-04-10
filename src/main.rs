@@ -125,7 +125,10 @@ async fn main() -> anyhow::Result<()> {
         app.web_tx = Some(web_tx.clone());
         app.web_input_rx = Some(web_input_rx);
         let _web_handle = tokio::spawn(async move {
-            if let Err(e) = hom_web::WebServer::new(cli.web_port, web_tx, web_input_tx).run().await {
+            if let Err(e) = hom_web::WebServer::new(cli.web_port, web_tx, web_input_tx)
+                .run()
+                .await
+            {
                 tracing::error!("Web server failed: {e}");
             }
         });
@@ -450,30 +453,52 @@ fn handle_command(
     match cmd {
         Command::Spawn {
             harness,
+            harness_name,
             model,
             working_dir,
             extra_args,
             remote,
         } => {
             if let Some(target) = remote {
-                let (cols, rows) = app.focused_pane_dimensions();
-                match app.spawn_remote_pane(harness, model, target, cols, rows) {
-                    Ok(id) => info!(pane_id = id, "remote pane spawned"),
-                    Err(e) => {
-                        app.command_bar.last_error = Some(format!("remote spawn failed: {e}"));
+                // Remote spawn requires a known built-in harness type.
+                match harness {
+                    Some(ht) => {
+                        let (cols, rows) = app.focused_pane_dimensions();
+                        match app.spawn_remote_pane(ht, model, target, cols, rows) {
+                            Ok(id) => info!(pane_id = id, "remote pane spawned"),
+                            Err(e) => {
+                                app.command_bar.last_error =
+                                    Some(format!("remote spawn failed: {e}"));
+                            }
+                        }
+                    }
+                    None => {
+                        app.command_bar.last_error = Some(format!(
+                            "remote spawn requires a known harness; '{harness_name}' is not recognized"
+                        ));
                     }
                 }
             } else {
                 let cols = terminal_size.width.saturating_sub(2);
                 let rows = terminal_size.height.saturating_sub(6);
-                match app.spawn_pane_with_opts(harness, model, working_dir, extra_args, cols, rows)
-                {
+                match app.spawn_pane_with_opts(
+                    harness,
+                    &harness_name,
+                    model,
+                    working_dir,
+                    extra_args,
+                    cols,
+                    rows,
+                ) {
                     Ok(id) => info!(pane_id = id, "spawned pane"),
                     Err(e) => {
                         app.command_bar.last_error = Some(format!("{e}"));
                     }
                 }
             }
+        }
+        Command::LoadPlugin { path } => {
+            app.handle_load_plugin(&path);
         }
         Command::Kill(selector) => {
             if let Some(id) = resolve_selector(&selector, app) {
@@ -512,7 +537,7 @@ fn handle_command(
         }
         Command::Help => {
             app.command_bar.last_error = Some(
-                "commands: :spawn :kill :focus :send :pipe :broadcast :run :layout :save :restore :quit".to_string()
+                "commands: :spawn :kill :focus :send :pipe :broadcast :run :layout :save :restore :load-plugin :quit".to_string()
             );
         }
         Command::Send { target, input } => {

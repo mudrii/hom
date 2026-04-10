@@ -12,13 +12,18 @@ use hom_core::{HarnessType, LayoutKind, PaneId, RemoteTarget};
 pub enum Command {
     /// `:spawn claude [--model opus] [--dir /path] [--remote user@host[:port]]`
     Spawn {
-        harness: HarnessType,
+        /// Built-in harness type if recognized, else `None` for plugin lookup.
+        harness: Option<HarnessType>,
+        /// Raw harness name from command bar (used for plugin lookup when `harness` is `None`).
+        harness_name: String,
         model: Option<String>,
         working_dir: Option<PathBuf>,
         extra_args: Vec<String>,
         /// SSH remote target. `None` means local spawn.
         remote: Option<RemoteTarget>,
     },
+    /// `:load-plugin /path/to/plugin.dylib`
+    LoadPlugin { path: PathBuf },
     /// `:focus 1` or `:focus claude`
     Focus(PaneSelector),
     /// `:send 1 "analyze this codebase"`
@@ -230,8 +235,8 @@ fn parse_command(input: &str) -> Result<Command, String> {
                     "usage: :spawn <harness> [model] [--dir path] [-- extra args]".to_string(),
                 );
             }
-            let harness = HarnessType::from_str_loose(parts[1])
-                .ok_or_else(|| format!("unknown harness: {}", parts[1]))?;
+            let harness_name = parts[1].to_string();
+            let harness = HarnessType::from_str_loose(parts[1]);
 
             // Parse the rest (parts[2]) for model, --dir, --remote, and extra args
             let mut model: Option<String> = None;
@@ -260,10 +265,10 @@ fn parse_command(input: &str) -> Result<Command, String> {
                         }
                     } else if tokens[i] == "--remote" {
                         if i + 1 < tokens.len() {
-                            remote = Some(
-                                RemoteTarget::parse(&tokens[i + 1])
-                                    .ok_or_else(|| format!("invalid remote target: {}", tokens[i + 1]))?,
-                            );
+                            remote =
+                                Some(RemoteTarget::parse(&tokens[i + 1]).ok_or_else(|| {
+                                    format!("invalid remote target: {}", tokens[i + 1])
+                                })?);
                             i += 2;
                         } else {
                             return Err("--remote requires user@host[:port]".to_string());
@@ -281,10 +286,19 @@ fn parse_command(input: &str) -> Result<Command, String> {
 
             Ok(Command::Spawn {
                 harness,
+                harness_name,
                 model,
                 working_dir,
                 extra_args,
                 remote,
+            })
+        }
+        Some("load-plugin") => {
+            let path = parts
+                .get(1)
+                .ok_or_else(|| "usage: :load-plugin <path>".to_string())?;
+            Ok(Command::LoadPlugin {
+                path: PathBuf::from(path),
             })
         }
         Some("focus") | Some("f") => {
@@ -431,9 +445,13 @@ mod tests {
             CommandBar::parse_command("spawn claude --remote alice@build.example.com").unwrap();
         match cmd {
             Command::Spawn {
-                harness, remote, ..
+                harness,
+                harness_name,
+                remote,
+                ..
             } => {
-                assert_eq!(harness, HarnessType::ClaudeCode);
+                assert_eq!(harness, Some(HarnessType::ClaudeCode));
+                assert_eq!(harness_name, "claude");
                 let t = remote.unwrap();
                 assert_eq!(t.user, "alice");
                 assert_eq!(t.host, "build.example.com");
@@ -445,8 +463,7 @@ mod tests {
 
     #[test]
     fn spawn_parses_remote_flag_with_port() {
-        let cmd =
-            CommandBar::parse_command("spawn claude --remote bob@10.0.0.5:2222").unwrap();
+        let cmd = CommandBar::parse_command("spawn claude --remote bob@10.0.0.5:2222").unwrap();
         match cmd {
             Command::Spawn { remote, .. } => {
                 let t = remote.unwrap();
@@ -463,6 +480,61 @@ mod tests {
             Command::Spawn { remote, .. } => assert!(remote.is_none()),
             _ => panic!("expected Spawn"),
         }
+    }
+
+    #[test]
+    fn spawn_harness_name_is_set_for_known_harness() {
+        let cmd = CommandBar::parse_command("spawn codex").unwrap();
+        match cmd {
+            Command::Spawn {
+                harness,
+                harness_name,
+                ..
+            } => {
+                assert_eq!(harness, Some(HarnessType::CodexCli));
+                assert_eq!(harness_name, "codex");
+            }
+            _ => panic!("expected Spawn"),
+        }
+    }
+
+    #[test]
+    fn spawn_unknown_harness_sets_harness_name_and_none() {
+        let cmd = CommandBar::parse_command("spawn mycli").unwrap();
+        match cmd {
+            Command::Spawn {
+                harness,
+                harness_name,
+                ..
+            } => {
+                assert!(harness.is_none(), "unknown harness should be None");
+                assert_eq!(harness_name, "mycli");
+            }
+            _ => panic!("expected Spawn"),
+        }
+    }
+
+    #[test]
+    fn load_plugin_parses_absolute_path() {
+        let cmd = CommandBar::parse_command(
+            "load-plugin /home/user/.config/hom/plugins/mycli.dylib",
+        )
+        .unwrap();
+        match cmd {
+            Command::LoadPlugin { path } => {
+                assert_eq!(
+                    path.to_str().unwrap(),
+                    "/home/user/.config/hom/plugins/mycli.dylib"
+                );
+            }
+            _ => panic!("expected LoadPlugin"),
+        }
+    }
+
+    #[test]
+    fn load_plugin_requires_path() {
+        let result = CommandBar::parse_command("load-plugin");
+        assert!(result.is_err());
     }
 
     #[test]

@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hom_adapters::AdapterRegistry;
+use hom_core::types::{McpCommand, McpRequest, McpResponse, PaneSummary};
 use hom_core::{
     HarnessConfig, HarnessType, HomConfig, HomResult, LayoutKind, PaneId, RemoteTarget,
     TerminalBackend,
 };
-use hom_core::types::{McpCommand, McpRequest, McpResponse, PaneSummary};
 use hom_pty::{AsyncPtyReader, PtyManager, RemotePtyManager, SshAuthMethod};
 use hom_terminal::ActiveBackend;
 use hom_web::{WebCell, WebFrame, WebInput, WebPane};
@@ -77,6 +77,15 @@ impl App {
         let layout = config.general.default_layout.clone();
         let input_router = InputRouter::from_config(&config.keybindings);
 
+        let mut adapter_registry = AdapterRegistry::new();
+
+        // Auto-load any plugins from ~/.config/hom/plugins/ at startup.
+        let plugin_dir = hom_plugin::PluginLoader::default_plugin_dir();
+        let loaded = adapter_registry.load_plugins_from_dir(&plugin_dir);
+        if !loaded.is_empty() {
+            tracing::info!(plugins = ?loaded, "auto-loaded plugins from {}", plugin_dir.display());
+        }
+
         Self {
             config,
             panes: HashMap::new(),
@@ -85,7 +94,7 @@ impl App {
             layout,
             input_router,
             command_bar: CommandBar::new(),
-            adapter_registry: AdapterRegistry::new(),
+            adapter_registry,
             pty_manager: PtyManager::new(),
             remote_ptys: RemotePtyManager::new(),
             should_quit: false,
@@ -99,20 +108,42 @@ impl App {
         }
     }
 
+    /// Load a plugin at runtime and register it in the adapter registry.
+    pub fn handle_load_plugin(&mut self, path: &std::path::Path) {
+        match self.adapter_registry.load_plugin(path) {
+            Ok(name) => {
+                tracing::info!(plugin = %name, "loaded plugin adapter");
+            }
+            Err(e) => {
+                self.command_bar.last_error = Some(format!("plugin load failed: {e}"));
+            }
+        }
+    }
+
     /// Spawn a new harness pane with additional options.
+    ///
+    /// `harness` is `Some` for built-in harness types and `None` for plugin-backed harnesses.
+    /// When `harness` is `None`, `harness_name` is used to look up a loaded plugin adapter.
+    // Eight parameters is unavoidable here: harness type, name, model, dir, args, dimensions (2),
+    // plus self. A builder struct would add complexity without improving call-site clarity.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_pane_with_opts(
         &mut self,
-        harness_type: HarnessType,
+        harness: Option<HarnessType>,
+        harness_name: &str,
         model: Option<String>,
         working_dir: Option<std::path::PathBuf>,
         extra_args: Vec<String>,
         cols: u16,
         rows: u16,
     ) -> HomResult<PaneId> {
-        self.spawn_pane_inner(harness_type, model, working_dir, extra_args, cols, rows)
+        self.spawn_pane_inner(harness, harness_name, model, working_dir, extra_args, cols, rows)
     }
 
     /// Spawn a new harness pane with defaults.
+    ///
+    /// Convenience wrapper — uses the built-in `harness_type` as both the
+    /// lookup key and the harness name.
     pub fn spawn_pane(
         &mut self,
         harness_type: HarnessType,
@@ -120,12 +151,16 @@ impl App {
         cols: u16,
         rows: u16,
     ) -> HomResult<PaneId> {
-        self.spawn_pane_inner(harness_type, model, None, Vec::new(), cols, rows)
+        let name = harness_type.default_binary().to_string();
+        self.spawn_pane_inner(Some(harness_type), &name, model, None, Vec::new(), cols, rows)
     }
 
+    // Eight parameters mirrors spawn_pane_with_opts; a builder struct is not warranted here.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_pane_inner(
         &mut self,
-        harness_type: HarnessType,
+        harness: Option<HarnessType>,
+        harness_name: &str,
         model: Option<String>,
         working_dir: Option<std::path::PathBuf>,
         extra_args: Vec<String>,
@@ -139,37 +174,50 @@ impl App {
             ));
         }
 
-        let adapter = self
-            .adapter_registry
-            .get(&harness_type)
-            .ok_or(hom_core::HomError::UnsupportedHarness(harness_type))?;
-
-        // Look up harness config from config.toml [harnesses.<name>] entries
-        // Uses the canonical config key (e.g. "claude-code", "pi-mono") that matches
-        // the keys in config/default.toml, falling back to default binary name.
-        let config_entry = self
-            .config
-            .harnesses
-            .get(harness_type.config_key())
-            .or_else(|| self.config.harnesses.get(harness_type.default_binary()));
+        // Extract all config data we need up front so the borrow on self.config
+        // ends before the mutable PTY/adapter operations below.
+        let (binary_override, config_default_model, env_vars, sideband_type, sideband_url) = {
+            let config_entry = if let Some(ht) = harness {
+                self.config
+                    .harnesses
+                    .get(ht.config_key())
+                    .or_else(|| self.config.harnesses.get(ht.default_binary()))
+            } else {
+                self.config.harnesses.get(harness_name)
+            };
+            match config_entry {
+                Some(entry) => (
+                    Some(entry.command.clone()),
+                    entry.default_model.clone(),
+                    entry.env.clone(),
+                    entry.sideband.clone(),
+                    entry.sideband_url.clone(),
+                ),
+                None => (None, None, std::collections::HashMap::new(), None, None),
+            }
+        };
+        let max_scrollback = self.config.general.max_scrollback;
 
         // Use explicit working_dir, or fall back to current dir
         let effective_dir =
             working_dir.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
 
-        let mut harness_config = HarnessConfig::new(harness_type, effective_dir);
+        // For plugin harnesses we still need a HarnessType for HarnessConfig.
+        // Use ClaudeCode as a neutral placeholder — the plugin's build_command()
+        // overrides the binary and arguments completely.
+        let config_harness_type = harness.unwrap_or(HarnessType::ClaudeCode);
+        let mut harness_config = HarnessConfig::new(config_harness_type, effective_dir);
 
         // Apply config.toml overrides
-        if let Some(entry) = config_entry {
-            harness_config.binary_override = Some(entry.command.clone());
-            if model.is_none() {
-                // Use default_model from config if no explicit model given
-                if let Some(ref default_model) = entry.default_model {
-                    harness_config.model = Some(default_model.clone());
-                }
-            }
-            harness_config.env_vars.extend(entry.env.clone());
+        if let Some(bin) = binary_override {
+            harness_config.binary_override = Some(bin);
         }
+        if model.is_none()
+            && let Some(default_model) = config_default_model
+        {
+            harness_config.model = Some(default_model);
+        }
+        harness_config.env_vars.extend(env_vars);
 
         // Explicit model from command bar overrides config default
         if let Some(m) = &model {
@@ -179,19 +227,37 @@ impl App {
         // Apply extra args from command bar
         harness_config.extra_args.extend(extra_args);
 
-        let cmd_spec = adapter.build_command(&harness_config);
+        // Build CommandSpec from the adapter (immutable borrow of self.adapter_registry).
+        // The borrow ends at the semicolon so subsequent mutable borrows are safe.
+        let (cmd_spec, display_name) = if let Some(ht) = harness {
+            let adapter = self
+                .adapter_registry
+                .get(&ht)
+                .ok_or(hom_core::HomError::UnsupportedHarness(ht))?;
+            (adapter.build_command(&harness_config), adapter.display_name().to_string())
+        } else {
+            let adapter = self
+                .adapter_registry
+                .get_plugin(harness_name)
+                .ok_or_else(|| {
+                    hom_core::HomError::Other(format!(
+                        "unknown harness '{harness_name}' — is the plugin loaded?"
+                    ))
+                })?;
+            (adapter.build_command(&harness_config), adapter.display_name().to_string())
+        };
+
         let pane_id = self.pty_manager.spawn(&cmd_spec, cols, rows)?;
 
         // Set up async reader
         let reader = self.pty_manager.take_reader(pane_id)?;
         let async_reader = AsyncPtyReader::start(pane_id, reader);
 
-        let scrollback = self.config.general.max_scrollback;
-        let terminal = hom_terminal::create_terminal(cols, rows, scrollback);
+        let terminal = hom_terminal::create_terminal(cols, rows, max_scrollback);
 
         // Build title showing the effective model (explicit or config default)
         let effective_model = harness_config.model.as_deref().unwrap_or("");
-        let title = format!("{} {}", adapter.display_name(), effective_model,)
+        let title = format!("{} {}", display_name, effective_model)
             .trim()
             .to_string();
 
@@ -199,25 +265,26 @@ impl App {
         // For HTTP sidebands (OpenCode), bind the session to the pane_id so
         // that send_prompt targets `/session/<pane_id>/prompt_async` rather
         // than the "default" fallback.
-        let sideband: Option<Arc<dyn hom_core::SidebandChannel>> = config_entry.and_then(|entry| {
-            let sideband_type = entry.sideband.as_deref()?;
-            let url = entry.sideband_url.as_deref()?;
-            match sideband_type {
-                "http" => {
+        let sideband: Option<Arc<dyn hom_core::SidebandChannel>> =
+            match (sideband_type.as_deref(), sideband_url.as_deref()) {
+                (Some("http"), Some(url)) => {
                     let http = hom_adapters::sideband::http::HttpSideband::new(url.to_string())
                         .with_session(pane_id.to_string());
                     Some(Arc::new(http) as Arc<dyn hom_core::SidebandChannel>)
                 }
-                "rpc" => Some(Arc::new(hom_adapters::sideband::rpc::RpcSideband::new(
-                    url.to_string(),
-                )) as Arc<dyn hom_core::SidebandChannel>),
+                (Some("rpc"), Some(url)) => Some(Arc::new(
+                    hom_adapters::sideband::rpc::RpcSideband::new(url.to_string()),
+                ) as Arc<dyn hom_core::SidebandChannel>),
                 _ => None,
-            }
-        });
+            };
+
+        // Use the resolved harness type for the Pane, falling back to ClaudeCode
+        // for plugin-backed panes (plugin adapters don't map to a built-in HarnessType).
+        let pane_harness_type = harness.unwrap_or(HarnessType::ClaudeCode);
 
         let pane = Pane {
             id: pane_id,
-            harness_type,
+            harness_type: pane_harness_type,
             model: model.clone(),
             title,
             terminal,
@@ -594,35 +661,33 @@ impl App {
                     },
                 }
             }
-            McpCommand::SendToPane { pane_id, text } => {
-                match pane_id.parse::<PaneId>() {
-                    Ok(id) => {
-                        if let Some(pane) = self.panes.get(&id) {
-                            let adapter = self.adapter_registry.get(&pane.harness_type);
-                            let bytes = adapter
-                                .map(|a| {
-                                    a.translate_input(&hom_core::OrchestratorCommand::Prompt(
-                                        text.clone(),
-                                    ))
-                                })
-                                .unwrap_or_else(|| format!("{text}\n").into_bytes());
-                            match self.pty_manager.write_to(id, &bytes) {
-                                Ok(()) => McpResponse::SendToPane { ok: true },
-                                Err(e) => McpResponse::Error {
-                                    error: e.to_string(),
-                                },
-                            }
-                        } else {
-                            McpResponse::Error {
-                                error: format!("pane not found: {pane_id}"),
-                            }
+            McpCommand::SendToPane { pane_id, text } => match pane_id.parse::<PaneId>() {
+                Ok(id) => {
+                    if let Some(pane) = self.panes.get(&id) {
+                        let adapter = self.adapter_registry.get(&pane.harness_type);
+                        let bytes = adapter
+                            .map(|a| {
+                                a.translate_input(&hom_core::OrchestratorCommand::Prompt(
+                                    text.clone(),
+                                ))
+                            })
+                            .unwrap_or_else(|| format!("{text}\n").into_bytes());
+                        match self.pty_manager.write_to(id, &bytes) {
+                            Ok(()) => McpResponse::SendToPane { ok: true },
+                            Err(e) => McpResponse::Error {
+                                error: e.to_string(),
+                            },
+                        }
+                    } else {
+                        McpResponse::Error {
+                            error: format!("pane not found: {pane_id}"),
                         }
                     }
-                    Err(_) => McpResponse::Error {
-                        error: format!("invalid pane_id: {pane_id}"),
-                    },
                 }
-            }
+                Err(_) => McpResponse::Error {
+                    error: format!("invalid pane_id: {pane_id}"),
+                },
+            },
             McpCommand::RunWorkflow { path, vars } => {
                 // The workflow executor lives in main.rs (handle_run). We cannot call it
                 // directly from App without pulling in the WorkflowBridge dependency.
@@ -631,52 +696,49 @@ impl App {
                 // A future refactor can move the bridge into App.
                 let _ = (path, vars);
                 McpResponse::Error {
-                    error: "run_workflow via MCP is not yet wired; use :run in the TUI command bar".into(),
+                    error: "run_workflow via MCP is not yet wired; use :run in the TUI command bar"
+                        .into(),
                 }
             }
-            McpCommand::GetPaneOutput { pane_id, lines } => {
-                match pane_id.parse::<PaneId>() {
-                    Ok(id) => {
-                        if let Some(pane) = self.panes.get(&id) {
-                            let snapshot = pane.terminal.screen_snapshot();
-                            let start = snapshot.rows.len().saturating_sub(lines);
-                            let output_lines: Vec<String> = snapshot.rows[start..]
-                                .iter()
-                                .map(|row| {
-                                    row.iter()
-                                        .map(|c| c.character)
-                                        .collect::<String>()
-                                        .trim_end()
-                                        .to_string()
-                                })
-                                .collect();
-                            McpResponse::GetPaneOutput {
-                                lines: output_lines,
-                            }
-                        } else {
-                            McpResponse::Error {
-                                error: format!("pane not found: {pane_id}"),
-                            }
+            McpCommand::GetPaneOutput { pane_id, lines } => match pane_id.parse::<PaneId>() {
+                Ok(id) => {
+                    if let Some(pane) = self.panes.get(&id) {
+                        let snapshot = pane.terminal.screen_snapshot();
+                        let start = snapshot.rows.len().saturating_sub(lines);
+                        let output_lines: Vec<String> = snapshot.rows[start..]
+                            .iter()
+                            .map(|row| {
+                                row.iter()
+                                    .map(|c| c.character)
+                                    .collect::<String>()
+                                    .trim_end()
+                                    .to_string()
+                            })
+                            .collect();
+                        McpResponse::GetPaneOutput {
+                            lines: output_lines,
+                        }
+                    } else {
+                        McpResponse::Error {
+                            error: format!("pane not found: {pane_id}"),
                         }
                     }
-                    Err(_) => McpResponse::Error {
-                        error: format!("invalid pane_id: {pane_id}"),
-                    },
                 }
-            }
-            McpCommand::KillPane { pane_id } => {
-                match pane_id.parse::<PaneId>() {
-                    Ok(id) => match self.kill_pane(id) {
-                        Ok(()) => McpResponse::KillPane { ok: true },
-                        Err(e) => McpResponse::Error {
-                            error: e.to_string(),
-                        },
+                Err(_) => McpResponse::Error {
+                    error: format!("invalid pane_id: {pane_id}"),
+                },
+            },
+            McpCommand::KillPane { pane_id } => match pane_id.parse::<PaneId>() {
+                Ok(id) => match self.kill_pane(id) {
+                    Ok(()) => McpResponse::KillPane { ok: true },
+                    Err(e) => McpResponse::Error {
+                        error: e.to_string(),
                     },
-                    Err(_) => McpResponse::Error {
-                        error: format!("invalid pane_id: {pane_id}"),
-                    },
-                }
-            }
+                },
+                Err(_) => McpResponse::Error {
+                    error: format!("invalid pane_id: {pane_id}"),
+                },
+            },
         }
     }
 
@@ -694,9 +756,8 @@ impl App {
             // Standard xterm 256-color palette
             match i {
                 0..=15 => [
-                    0x00_00_00, 0xCC_00_00, 0x00_CC_00, 0xCC_CC_00,
-                    0x00_00_CC, 0xCC_00_CC, 0x00_CC_CC, 0xCC_CC_CC,
-                    0x55_55_55, 0xFF_55_55, 0x55_FF_55, 0xFF_FF_55,
+                    0x00_00_00, 0xCC_00_00, 0x00_CC_00, 0xCC_CC_00, 0x00_00_CC, 0xCC_00_CC,
+                    0x00_CC_CC, 0xCC_CC_CC, 0x55_55_55, 0xFF_55_55, 0x55_FF_55, 0xFF_FF_55,
                     0x55_55_FF, 0xFF_55_FF, 0x55_FF_FF, 0xFF_FF_FF,
                 ][i as usize],
                 16..=231 => {
@@ -726,25 +787,27 @@ impl App {
                             use hom_core::TermColor;
                             let to_rgb = |c: &TermColor| -> u32 {
                                 match c {
-                                    TermColor::Rgb(r, g, b) => (*r as u32) << 16 | (*g as u32) << 8 | *b as u32,
-                                    TermColor::Black         => 0x00_00_00,
-                                    TermColor::Red           => 0xCC_00_00,
-                                    TermColor::Green         => 0x00_CC_00,
-                                    TermColor::Yellow        => 0xCC_CC_00,
-                                    TermColor::Blue          => 0x00_00_CC,
-                                    TermColor::Magenta       => 0xCC_00_CC,
-                                    TermColor::Cyan          => 0x00_CC_CC,
-                                    TermColor::White         => 0xCC_CC_CC,
-                                    TermColor::BrightBlack   => 0x55_55_55,
-                                    TermColor::BrightRed     => 0xFF_55_55,
-                                    TermColor::BrightGreen   => 0x55_FF_55,
-                                    TermColor::BrightYellow  => 0xFF_FF_55,
-                                    TermColor::BrightBlue    => 0x55_55_FF,
+                                    TermColor::Rgb(r, g, b) => {
+                                        (*r as u32) << 16 | (*g as u32) << 8 | *b as u32
+                                    }
+                                    TermColor::Black => 0x00_00_00,
+                                    TermColor::Red => 0xCC_00_00,
+                                    TermColor::Green => 0x00_CC_00,
+                                    TermColor::Yellow => 0xCC_CC_00,
+                                    TermColor::Blue => 0x00_00_CC,
+                                    TermColor::Magenta => 0xCC_00_CC,
+                                    TermColor::Cyan => 0x00_CC_CC,
+                                    TermColor::White => 0xCC_CC_CC,
+                                    TermColor::BrightBlack => 0x55_55_55,
+                                    TermColor::BrightRed => 0xFF_55_55,
+                                    TermColor::BrightGreen => 0x55_FF_55,
+                                    TermColor::BrightYellow => 0xFF_FF_55,
+                                    TermColor::BrightBlue => 0x55_55_FF,
                                     TermColor::BrightMagenta => 0xFF_55_FF,
-                                    TermColor::BrightCyan    => 0x55_FF_FF,
-                                    TermColor::BrightWhite   => 0xFF_FF_FF,
-                                    TermColor::Indexed(i)    => xterm256_to_rgb(*i),
-                                    TermColor::Default       => 0xFF_FF_FF,
+                                    TermColor::BrightCyan => 0x55_FF_FF,
+                                    TermColor::BrightWhite => 0xFF_FF_FF,
+                                    TermColor::Indexed(i) => xterm256_to_rgb(*i),
+                                    TermColor::Default => 0xFF_FF_FF,
                                 }
                             };
                             WebCell {
@@ -898,6 +961,19 @@ mod tests {
         assert!(
             newly_exited.is_empty(),
             "expected no exited panes for empty app"
+        );
+    }
+
+    #[test]
+    fn handle_load_plugin_nonexistent_sets_error() {
+        let cfg = hom_core::HomConfig::default();
+        let mut app = App::new(cfg);
+        app.handle_load_plugin(std::path::Path::new("/nonexistent.dylib"));
+        assert!(app.command_bar.last_error.is_some());
+        let err = app.command_bar.last_error.as_ref().unwrap();
+        assert!(
+            err.contains("plugin") || err.contains("load") || err.contains("nonexistent"),
+            "unexpected error message: {err}"
         );
     }
 }
