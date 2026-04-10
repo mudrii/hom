@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Format check ──────────────────────────────────────────────────────
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # ── Clippy (warnings as errors) ───────────────────────────────────────
+  clippy:
+    name: clippy / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # vt100-backend only — ghostty-backend requires Zig >= 0.15.x and network
+      # access to deps.files.ghostty.org at Zig build time. To test it in CI,
+      # pre-seed ~/.cache/zig/p/ on a self-hosted runner with Zig installed.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ── Tests ─────────────────────────────────────────────────────────────
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace
+
+  # ── Doc build ─────────────────────────────────────────────────────────
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build docs
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # ── GhosttyBackend (self-hosted, requires Zig >= 0.15.x) ─────────────
+  # Runs only on runners labelled 'zig'. Those runners must have:
+  #   1. Zig >= 0.15.x in PATH
+  #   2. ~/.cache/zig/p/ pre-seeded OR network access to deps.files.ghostty.org
+  #
+  # To provision a runner:
+  #   1. Run scripts/seed-zig-cache.sh once (network access required)
+  #   2. Register the runner: Settings → Actions → Runners → New self-hosted runner
+  #   3. Add runner labels: self-hosted, zig
+  ghostty:
+    name: ghostty-backend (self-hosted)
+    runs-on: [self-hosted, zig]
+    if: ${{ !cancelled() }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Zig version
+        run: zig version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ghostty
+      - name: Restore Zig package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig/p
+          key: zig-pkg-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            zig-pkg-${{ runner.os }}-
+      - name: Build ghostty-backend
+        run: cargo build --features ghostty-backend -p hom-terminal
+      - name: Test ghostty-backend
+        run: cargo test --features ghostty-backend -p hom-terminal
+      - name: Clippy ghostty-backend
+        run: cargo clippy --features ghostty-backend -p hom-terminal -- -D warnings
