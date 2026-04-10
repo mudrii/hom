@@ -225,4 +225,62 @@ mod tests {
         mgr.kill_all();
         assert!(mgr.active_panes().is_empty());
     }
+
+    #[test]
+    fn test_spawn_and_read_output() {
+        use std::io::Read as _;
+
+        let mut mgr = PtyManager::new();
+        let spec = CommandSpec {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "echo hello_from_pty".to_string()],
+            env: std::collections::HashMap::new(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        };
+        let id = mgr.spawn(&spec, 80, 24).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut reader = mgr.take_reader(id).unwrap();
+        let mut buf = [0u8; 1024];
+        let n = reader.read(&mut buf).unwrap_or(0);
+        let output = String::from_utf8_lossy(&buf[..n]);
+
+        assert!(
+            output.contains("hello_from_pty"),
+            "expected 'hello_from_pty' in PTY output, got: {output}"
+        );
+
+        mgr.kill_all();
+    }
+
+    #[test]
+    fn test_spawn_and_write_input() {
+        use std::io::Read as _;
+
+        let mut mgr = PtyManager::new();
+        let spec = CommandSpec {
+            program: "cat".to_string(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        };
+        let id = mgr.spawn(&spec, 80, 24).unwrap();
+
+        mgr.write_to(id, b"test_input\n").unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut reader = mgr.take_reader(id).unwrap();
+        let mut buf = [0u8; 1024];
+        let n = reader.read(&mut buf).unwrap_or(0);
+        let output = String::from_utf8_lossy(&buf[..n]);
+
+        assert!(
+            output.contains("test_input"),
+            "expected echo of 'test_input', got: {output}"
+        );
+
+        mgr.kill_all();
+    }
 }

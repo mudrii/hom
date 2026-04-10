@@ -1190,6 +1190,7 @@ name = "hom-terminal"
 version = "0.1.0"
 dependencies = [
  "hom-core",
+ "hom-pty",
  "ratatui",
  "vt100",
 ]

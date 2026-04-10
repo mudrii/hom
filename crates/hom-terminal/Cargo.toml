@@ -17,3 +17,6 @@ hom-core.workspace = true
 ratatui.workspace = true
 # libghostty-vt = { workspace = true, optional = true }
 vt100 = { workspace = true, optional = true }
+
+[dev-dependencies]
+hom-pty.workspace = true

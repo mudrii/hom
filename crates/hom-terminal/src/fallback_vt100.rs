@@ -170,4 +170,38 @@ mod tests {
         assert!(text.contains("line2"));
         assert!(text.contains("line3"));
     }
+
+    #[test]
+    fn test_pty_to_terminal_pipeline() {
+        use hom_core::CommandSpec;
+        use hom_pty::PtyManager;
+        use std::io::Read;
+
+        let mut mgr = PtyManager::new();
+        let spec = CommandSpec {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "echo PIPELINE_TEST_OUTPUT".to_string()],
+            env: std::collections::HashMap::new(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        };
+        let id = mgr.spawn(&spec, 80, 24).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let mut reader = mgr.take_reader(id).unwrap();
+        let mut buf = [0u8; 4096];
+        let n = reader.read(&mut buf).unwrap_or(0);
+
+        let mut term = Vt100Backend::new(80, 24, 100);
+        term.process(&buf[..n]);
+
+        let snap = term.screen_snapshot();
+        let text = snap.text();
+        assert!(
+            text.contains("PIPELINE_TEST_OUTPUT"),
+            "expected 'PIPELINE_TEST_OUTPUT' in terminal snapshot, got: {text}"
+        );
+
+        mgr.kill_all();
+    }
 }
