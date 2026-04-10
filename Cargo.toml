@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/hom-core",
+    "crates/hom-mcp",
     "crates/hom-terminal",
     "crates/hom-pty",
     "crates/hom-adapters",
@@ -30,6 +31,7 @@ hom-adapters = { path = "crates/hom-adapters" }
 hom-workflow = { path = "crates/hom-workflow" }
 hom-tui = { path = "crates/hom-tui" }
 hom-db = { path = "crates/hom-db" }
+hom-mcp = { path = "crates/hom-mcp" }
 
 # Terminal emulation
 libghostty-vt = "0.1.1"

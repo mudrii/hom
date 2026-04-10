@@ -1,0 +1,15 @@
+[package]
+name = "hom-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MCP server for HOM — exposes harness control as Model Context Protocol tools"
+
+[dependencies]
+hom-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
