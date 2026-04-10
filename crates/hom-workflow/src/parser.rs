@@ -39,7 +39,6 @@ pub struct StepDef {
 }
 
 /// Retry policy for a step.
-/// Retry policy for a step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryDef {
     #[serde(default = "default_max_attempts")]
