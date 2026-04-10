@@ -86,9 +86,13 @@ impl HarnessAdapter for PiMonoAdapter {
     }
 
     fn detect_completion(&self, screen: &ScreenSnapshot) -> CompletionStatus {
-        let last_lines = screen.last_n_lines(3);
-        if last_lines.contains('>') || last_lines.contains("❯") {
+        let last_line = screen.last_non_empty_line();
+        let last_lines = screen.last_n_lines(5);
+
+        if last_line.starts_with('❯') || last_line.starts_with("pi>") {
             CompletionStatus::WaitingForInput
+        } else if last_lines.contains("Error:") || last_lines.contains("error:") {
+            CompletionStatus::Failed { error: last_lines }
         } else {
             CompletionStatus::Running
         }
@@ -103,5 +107,80 @@ impl HarnessAdapter for PiMonoAdapter {
             headless_command: None,
             sideband_type: Some(SidebandType::Rpc),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hom_core::traits::{Cell, CursorState, ScreenSnapshot};
+
+    fn make_screen(lines: &[&str]) -> ScreenSnapshot {
+        let rows: Vec<Vec<Cell>> = lines
+            .iter()
+            .map(|line| {
+                let mut row: Vec<Cell> = line
+                    .chars()
+                    .map(|c| Cell {
+                        character: c,
+                        ..Cell::default()
+                    })
+                    .collect();
+                while row.len() < 80 {
+                    row.push(Cell::default());
+                }
+                row
+            })
+            .collect();
+        let mut all_rows = rows;
+        while all_rows.len() < 5 {
+            all_rows.push(vec![Cell::default(); 80]);
+        }
+        ScreenSnapshot {
+            cols: 80,
+            num_rows: all_rows.len() as u16,
+            rows: all_rows,
+            cursor: CursorState::default(),
+        }
+    }
+
+    #[test]
+    fn test_detect_waiting_for_input() {
+        let adapter = PiMonoAdapter::new();
+        let screen = make_screen(&["some output", "pi> "]);
+        assert!(matches!(
+            adapter.detect_completion(&screen),
+            CompletionStatus::WaitingForInput
+        ));
+    }
+
+    #[test]
+    fn test_detect_running() {
+        let adapter = PiMonoAdapter::new();
+        let screen = make_screen(&["Working on task...", "Processing..."]);
+        assert!(matches!(
+            adapter.detect_completion(&screen),
+            CompletionStatus::Running
+        ));
+    }
+
+    #[test]
+    fn test_detect_error() {
+        let adapter = PiMonoAdapter::new();
+        let screen = make_screen(&["Error: something failed"]);
+        assert!(matches!(
+            adapter.detect_completion(&screen),
+            CompletionStatus::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_no_false_positive_on_code_with_angle_bracket() {
+        let adapter = PiMonoAdapter::new();
+        let screen = make_screen(&["if x > 0 {", "    println!(\"hi\");", "}", "compiling..."]);
+        assert!(matches!(
+            adapter.detect_completion(&screen),
+            CompletionStatus::Running
+        ));
     }
 }

@@ -27,6 +27,19 @@ impl ScreenSnapshot {
             .join("\n")
     }
 
+    /// Get the last non-empty line as a trimmed string.
+    /// Skips blank trailing rows that are padding from the terminal buffer.
+    pub fn last_non_empty_line(&self) -> String {
+        for row in self.rows.iter().rev() {
+            let line: String = row.iter().map(|c| c.character).collect::<String>();
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        String::new()
+    }
+
     /// Get all visible text as a single string.
     pub fn text(&self) -> String {
         self.rows
@@ -200,4 +213,53 @@ pub trait SidebandChannel: Send + Sync {
 
     /// Check if the sideband is connected/healthy.
     async fn health_check(&self) -> HomResult<bool>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_snapshot(lines: &[&str], cols: u16) -> ScreenSnapshot {
+        let rows: Vec<Vec<Cell>> = lines
+            .iter()
+            .map(|line| {
+                let mut row: Vec<Cell> = line
+                    .chars()
+                    .map(|c| Cell {
+                        character: c,
+                        ..Cell::default()
+                    })
+                    .collect();
+                while row.len() < cols as usize {
+                    row.push(Cell::default());
+                }
+                row
+            })
+            .collect();
+        let num_rows = rows.len() as u16;
+        ScreenSnapshot {
+            rows,
+            cols,
+            num_rows,
+            cursor: CursorState::default(),
+        }
+    }
+
+    #[test]
+    fn test_last_non_empty_line_with_trailing_blanks() {
+        let snap = make_snapshot(&["hello", "world", "", ""], 10);
+        assert_eq!(snap.last_non_empty_line(), "world");
+    }
+
+    #[test]
+    fn test_last_non_empty_line_all_blank() {
+        let snap = make_snapshot(&["", "", ""], 10);
+        assert_eq!(snap.last_non_empty_line(), "");
+    }
+
+    #[test]
+    fn test_last_non_empty_line_with_prompt() {
+        let snap = make_snapshot(&["output text", "❯ ", ""], 20);
+        assert_eq!(snap.last_non_empty_line(), "❯");
+    }
 }
