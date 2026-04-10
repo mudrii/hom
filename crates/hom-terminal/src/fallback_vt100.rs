@@ -114,3 +114,60 @@ fn map_vt100_color(color: vt100::Color) -> TermColor {
         vt100::Color::Rgb(r, g, b) => TermColor::Rgb(r, g, b),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hom_core::TerminalBackend;
+
+    #[test]
+    fn test_process_and_snapshot() {
+        let mut term = Vt100Backend::new(80, 24, 100);
+        term.process(b"Hello, World!");
+        let snap = term.screen_snapshot();
+        let text = snap.text();
+        assert!(text.contains("Hello, World!"), "got: {text}");
+    }
+
+    #[test]
+    fn test_color_processing() {
+        let mut term = Vt100Backend::new(80, 24, 100);
+        term.process(b"\x1b[31mRed\x1b[0m");
+        let snap = term.screen_snapshot();
+        assert!(
+            matches!(snap.rows[0][0].fg, hom_core::TermColor::Red),
+            "got: {:?}",
+            snap.rows[0][0].fg
+        );
+    }
+
+    #[test]
+    fn test_resize() {
+        let mut term = Vt100Backend::new(80, 24, 100);
+        term.resize(40, 12);
+        let snap = term.screen_snapshot();
+        assert_eq!(snap.cols, 40);
+        assert_eq!(snap.num_rows, 12);
+    }
+
+    #[test]
+    fn test_cursor_movement() {
+        let mut term = Vt100Backend::new(80, 24, 100);
+        // LF moves down without carriage return; \r\n resets column
+        term.process(b"abc\r\ndef");
+        let cursor = term.cursor();
+        assert_eq!(cursor.row, 1);
+        assert_eq!(cursor.col, 3);
+    }
+
+    #[test]
+    fn test_newline_handling() {
+        let mut term = Vt100Backend::new(80, 24, 100);
+        term.process(b"line1\nline2\nline3");
+        let snap = term.screen_snapshot();
+        let text = snap.text();
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+        assert!(text.contains("line3"));
+    }
+}
