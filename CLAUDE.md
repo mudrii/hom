@@ -90,7 +90,7 @@ Workspace: add `--workspace` to check/test/nextest/clippy. Feature/doc changes: 
 - `hom-plugin` depends on `hom-core` only
 - `hom-adapters` depends on `hom-core`, `hom-plugin`
 - `hom-workflow` depends on `hom-core` only
-- `hom-tui` depends on `hom-core`, `hom-terminal`, `hom-pty`, `hom-adapters`, `hom-workflow`, `hom-db`
+- `hom-tui` depends on `hom-core`, `hom-terminal`, `hom-pty`, `hom-adapters`, `hom-workflow`, `hom-db`, `hom-web`
 - `hom-db` depends on `hom-core` only
 - `hom-mcp` depends on `hom-core` only
 - `hom-web` depends on `hom-core` only
@@ -417,6 +417,15 @@ hom/
 - Auto-scan of `~/.config/hom/plugins/` at `App::new()` startup
 - Unknown harness names fall through to plugin registry: `:spawn mycli` works if `mycli` plugin is loaded
 - 10 unit tests in `hom-plugin` + 3 in `hom-adapters` + 3 in `hom-tui`
+
+**Resolved (April 11, 2026 — Round 2 correctness fixes):**
+- `kill_pane()` now dispatches to `remote_ptys.kill()` for IDs ≥1000 (was calling `pty_manager.kill()` which returned `PaneNotFound` and early-returned before removing the pane — zombie pane leak)
+- `Event::Resize` and `Command::Layout` both dispatch `remote_ptys.resize()` for remote pane IDs (was silently discarding `pty_manager.resize()` errors for remote IDs)
+- `poll_pending_completions()` and `poll_pty_output()` use the plugin adapter (via `pane.plugin_name`) instead of the `ClaudeCode` placeholder harness type — plugin workflow completion detection now works
+- `Pane` struct gains `plugin_name: Option<String>` field; set to `Some(harness_name)` in `spawn_pane_inner` when `harness: None`; `None` for all built-in and remote panes
+- `handle_load_plugin()` success no longer sets `last_error` (render prefixes it with "Error:" in red; tracing info log is sufficient)
+- `App::new()` uses `adapter_registry.scan_default_plugin_dir()` — removes direct `hom_plugin::` reference from `hom-tui`
+- `hom-plugin` dependency removed from `hom-tui/Cargo.toml`; dep rules updated (hom-tui now correctly lists `hom-web` as a dep)
 
 **No remaining stubs** — all features are implemented. GhosttyBackend runtime validation requires network access during Zig build.
 
