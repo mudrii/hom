@@ -16,7 +16,6 @@ jobs:
     name: build / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
@@ -77,7 +76,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ARCHIVE }}
-          generate_release_notes: true
 
   homebrew:
     name: Update Homebrew formula
@@ -122,3 +120,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: Formula/hom.rb
+          generate_release_notes: true
