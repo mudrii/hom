@@ -237,7 +237,7 @@ fn parse_keybinding(s: &str) -> Option<Keybinding> {
 }
 
 /// Encode a crossterm key event into raw bytes for a PTY.
-fn encode_key_event(key: &KeyEvent) -> Vec<u8> {
+pub fn encode_key_event(key: &KeyEvent) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
