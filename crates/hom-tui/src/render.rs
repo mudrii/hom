@@ -30,6 +30,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         app.panes.len(),
         app.focused_pane,
         app.workflow_status.as_deref(),
+        app.total_cost,
     );
 
     // ── Pane grid ────────────────────────────────────────────────

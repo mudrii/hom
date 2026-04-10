@@ -13,6 +13,7 @@ pub fn render_status_rail(
     pane_count: usize,
     focused_pane: Option<u32>,
     workflow_status: Option<&str>,
+    total_cost: f64,
 ) {
     let mut spans = vec![
         Span::styled(
@@ -48,6 +49,14 @@ pub fn render_status_rail(
         ));
     }
 
+    if total_cost > 0.0 {
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            format!("${total_cost:.2}"),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+
     spans.push(Span::raw(" | "));
     spans.push(Span::styled(
         "Ctrl-` cmd | Ctrl-Tab pane | Ctrl-Q quit",
@@ -57,4 +66,51 @@ pub fn render_status_rail(
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn cost_appears_when_positive() {
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 80, 1);
+                render_status_rail(frame, area, 2, Some(1), None, 3.14);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let line: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            line.contains("$3.14"),
+            "expected '$3.14' in status rail, got: {line:?}"
+        );
+    }
+
+    #[test]
+    fn cost_hidden_when_zero() {
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 80, 1);
+                render_status_rail(frame, area, 1, None, None, 0.0);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let line: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            !line.contains('$'),
+            "expected no '$' in status rail when cost is 0, got: {line:?}"
+        );
+    }
 }

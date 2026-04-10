@@ -53,6 +53,8 @@ pub struct App {
     pub db: Option<std::sync::Arc<hom_db::HomDb>>,
     /// Pending completions waiting for harness detect_completion().
     pub pending_completions: Vec<PendingCompletion>,
+    /// Running total cost in USD, polled from the database.
+    pub total_cost: f64,
 }
 
 impl App {
@@ -74,6 +76,7 @@ impl App {
             workflow_status: None,
             db: None,
             pending_completions: Vec::new(),
+            total_cost: 0.0,
         }
     }
 

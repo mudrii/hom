@@ -152,6 +152,12 @@ async fn run_app(
     mut workflow_rx: WorkflowRequestRx,
     bridge: Arc<WorkflowBridge>,
 ) -> anyhow::Result<()> {
+    // Cost polling: query total_cost from DB roughly every second.
+    let (cost_tx, mut cost_rx) = tokio::sync::mpsc::unbounded_channel::<f64>();
+    let fps = app.config.general.render_fps.max(1) as u64;
+    let cost_poll_interval = fps; // poll every `fps` ticks ≈ 1 second
+    let mut cost_tick_counter: u64 = 0;
+
     loop {
         // Draw
         terminal.draw(|frame| {
@@ -254,6 +260,25 @@ async fn run_app(
 
         // Check pending workflow completions (detect_completion polling)
         app.poll_pending_completions();
+
+        // Poll total cost from the database periodically (~1 second)
+        cost_tick_counter += 1;
+        if cost_tick_counter >= cost_poll_interval {
+            cost_tick_counter = 0;
+            if let Some(ref db) = app.db {
+                let db = db.clone();
+                let tx = cost_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(cost) = hom_db::cost::total_cost(db.pool()).await {
+                        let _ = tx.send(cost);
+                    }
+                });
+            }
+        }
+        // Drain cost results into app state
+        while let Ok(cost) = cost_rx.try_recv() {
+            app.total_cost = cost;
+        }
 
         // Check for exited processes
         let pane_ids: Vec<_> = app.pane_order.clone();
