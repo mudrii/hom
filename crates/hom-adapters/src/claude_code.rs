@@ -1,12 +1,29 @@
 //! Adapter for Claude Code CLI.
 //!
-//! **Tier 1** — Full orchestration/steering via client mode (stdin/stdout).
+//! **Tier 1** — Full orchestration via stdin/stdout with stream-json output.
 //!
 //! Binary: `claude`
-//! Structured output: `--output-format stream-json`
-//! Client mode: `--client-mode` for stdin/stdout IPC
-//! Known issue: Ink/React renderer causes flickering in multiplexers.
-//! Mitigation: Use headless mode for automated workflow steps.
+//! Sideband: None (uses PTY + stream-json output format)
+//!
+//! # Known Limitation: Terminal Flickering
+//!
+//! Claude Code's Ink/React-based TUI generates approximately 4,000–6,700
+//! scroll events per second in any terminal multiplexer. This is upstream
+//! behavior that cannot be mitigated in HOM.
+//!
+//! **Workaround for automated workflow steps:** Use headless mode by adding
+//! `--output-format stream-json` to `extra_args` in the harness config.
+//! Headless mode suppresses the TUI and outputs JSONL events instead, which
+//! HOM's `parse_screen()` can parse directly. Example config:
+//!
+//! ```toml
+//! [harnesses.claude-code]
+//! command = "claude"
+//! extra_args = ["--output-format", "stream-json"]
+//! ```
+//!
+//! In this mode, the pane renders JSON lines rather than a TUI, but
+//! completion detection and output parsing work correctly.
 
 use hom_core::*;
 
