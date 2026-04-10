@@ -341,6 +341,13 @@ hom/
 - RPC get_events() implemented — non-blocking try_lock + 1ms timeout, parses JSON-RPC notifications
 - End-to-end PTY pipeline tests — spawn→read (echo), spawn→write→read (cat), PTY→Vt100→ScreenSnapshot
 
+**Resolved (April 10, 2026 — Phase 7 Important):**
+- Process exit notification — command_bar.last_error set when a pane exits with code N
+- Sideband health polling — health_check() called every ~5s in main loop; notifies on failure
+- Claude Code flickering documented — headless mode (--output-format stream-json) workaround in claude_code.rs
+- Keybinding validation — validate_keybindings() at startup, warns on invalid config strings
+- AsyncPtyReader cancellation — abort() method added; called in kill_pane() before pane removal
+
 **Remaining work — documentation and hardening:**
 - Run NFR benchmarks against targets (60fps, <30MB, <50ms) — benchmarks exist but not yet validated
 - GhosttyBackend wiring when libghostty-vt is published
