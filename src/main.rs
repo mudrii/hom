@@ -304,6 +304,18 @@ async fn run_app(
         let exited_panes = app.handle_exited_panes();
         for (pane_id, exit_code) in &exited_panes {
             warn!(pane_id, exit_code, "harness process exited");
+
+            // Notify the user in the command bar so they see it immediately,
+            // even if they are not looking at the affected pane.
+            let harness_name = app
+                .panes
+                .get(pane_id)
+                .map(|p| p.harness_type.display_name().to_string())
+                .unwrap_or_else(|| format!("pane #{pane_id}"));
+            app.command_bar.last_error = Some(format!(
+                "pane #{pane_id} ({harness_name}) exited with code {exit_code}"
+            ));
+
             // Resolve any pending workflow completions for this pane
             let mut resolved_indices = Vec::new();
             for (i, pending) in app.pending_completions.iter().enumerate() {

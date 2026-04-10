@@ -469,4 +469,14 @@ mod tests {
         assert!(app.pane_order.is_empty());
         assert!(app.pending_completions.is_empty());
     }
+
+    #[test]
+    fn test_handle_exited_panes_returns_empty_for_new_app() {
+        let mut app = App::new(HomConfig::default());
+        let newly_exited = app.handle_exited_panes();
+        assert!(
+            newly_exited.is_empty(),
+            "expected no exited panes for empty app"
+        );
+    }
 }
