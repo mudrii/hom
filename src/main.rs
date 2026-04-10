@@ -474,7 +474,7 @@ fn handle_command(
                     }
                     None => {
                         app.command_bar.last_error = Some(format!(
-                            "remote spawn requires a known harness; '{harness_name}' is not recognized"
+                            "remote spawn only supports built-in harnesses; plugin '{harness_name}' cannot be spawned remotely"
                         ));
                     }
                 }

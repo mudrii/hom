@@ -113,6 +113,7 @@ impl App {
         match self.adapter_registry.load_plugin(path) {
             Ok(name) => {
                 tracing::info!(plugin = %name, "loaded plugin adapter");
+                self.command_bar.last_error = Some(format!("plugin '{name}' loaded"));
             }
             Err(e) => {
                 self.command_bar.last_error = Some(format!("plugin load failed: {e}"));
