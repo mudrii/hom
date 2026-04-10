@@ -223,6 +223,14 @@ impl App {
 
     /// Kill a pane and remove it.
     pub fn kill_pane(&mut self, pane_id: PaneId) -> HomResult<()> {
+        // Abort the async reader task before killing the PTY process.
+        // This reduces the window between kill and task exit.
+        if let Some(pane) = self.panes.get(&pane_id)
+            && let Some(reader) = &pane.pty_reader
+        {
+            reader.abort();
+        }
+
         self.pty_manager.kill(pane_id)?;
         self.panes.remove(&pane_id);
         self.pane_order.retain(|&id| id != pane_id);

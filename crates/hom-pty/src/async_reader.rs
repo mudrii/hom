@@ -13,7 +13,7 @@ use hom_core::PaneId;
 pub struct AsyncPtyReader {
     pub pane_id: PaneId,
     pub rx: mpsc::Receiver<Vec<u8>>,
-    _handle: tokio::task::JoinHandle<()>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 impl AsyncPtyReader {
@@ -50,7 +50,32 @@ impl AsyncPtyReader {
         Self {
             pane_id,
             rx,
-            _handle: handle,
+            handle,
         }
+    }
+
+    /// Signal the background reader task to stop.
+    ///
+    /// For `spawn_blocking` tasks, this detaches the task rather than
+    /// immediately terminating it — the blocking thread exits when its
+    /// next `read()` call returns (which happens when the PTY fd closes).
+    /// Calling `abort()` is still useful to reduce the detach window.
+    pub fn abort(&self) {
+        self.handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[tokio::test]
+    async fn test_abort_does_not_panic() {
+        // Create a reader over an in-memory cursor — it exhausts quickly.
+        // abort() should be safe to call at any point, even after task exit.
+        let cursor = Box::new(Cursor::new(b"hello".to_vec())) as Box<dyn Read + Send>;
+        let reader = AsyncPtyReader::start(99, cursor);
+        reader.abort();
     }
 }
