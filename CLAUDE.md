@@ -96,28 +96,93 @@ Workspace: add `--workspace` to check/test/nextest/clippy. Feature/doc changes: 
 
 ## Design Principles
 
-- SRP, DRY, domain-oriented modules; avoid `utils`/`helpers`/`common`
-- Composition, traits, enums over branching sprawl
-- DI through constructors and arguments; builders for complex construction
-- See `.claude/rules/rust-patterns.md` for detailed style, API, type, and readability rules
+### Clean Project Structure
+- Each crate, module, and file has one clear responsibility — domain-oriented boundaries
+- Avoid dumping-ground modules named `utils`, `helpers`, `common`
+- Files that change together live together; split by responsibility, not technical layer
+- Keep the project structure predictable — follow the file layout below
 
-### Errors
+### Single Responsibility Principle (SRP) — STRICT
+- Every module, type, and function has exactly one reason to change
+- If a function validates, orchestrates, AND persists — split it
+- If a struct mixes domain logic with transport/serialization — split it
+- One public type per module when the type is complex; group small related types
+
+### DRY — Don't Repeat Yourself
+- Remove repeated validation, mapping, branching, and policy logic
+- Extract only when the abstraction improves clarity (not for the sake of it)
+- Three similar lines is better than a premature abstraction; six is not
+- Constants for repeated magic values; types for repeated validation patterns
+
+### Open/Closed Principle (OCP)
+- Extend behavior through composition, traits, enums, and additive configuration
+- Do not modify existing stable code to add new variants — add new implementations
+- Use `#[non_exhaustive]` on public enums and structs expected to grow
+- Prefer match arms over if-else chains; the compiler enforces exhaustiveness
+
+### Dependency Injection — MANDATORY
+- Pass all dependencies as constructor arguments or function parameters
+- Never hardcode dependency selection, URLs, ports, credentials, or feature switches
+- Never instantiate external clients, repositories, or runtime collaborators inside core domain
+- No globals, no hidden singletons, no `static mut`, no `OnceLock` for DI workarounds
+- `Arc` only when shared ownership is actually required — prefer ownership transfer
+- Traits at consumer boundaries when multiple implementations exist; concrete types internally
+
+### Clean Code and Readability
+- Keep functions short, explicit, and focused on one job
+- Prefer straightforward control flow over clever compression
+- Use consistent formatting — `cargo fmt` defines layout, no manual overrides
+- Use consistent indentation — `rustfmt` default (4 spaces)
+- Use meaningful whitespace to separate logical sections; do not decorate
+- Keep naming concrete and intention-revealing; avoid abbreviations
+- Separate domain logic from transport, persistence, configuration, and presentation
+- No hardcoded values — move runtime values into typed config, constants, or inputs
+
+### Comments — Thoughtful, Not Redundant
+- Comments explain **intent**, **invariants**, **ownership rules**, **safety conditions**, **non-obvious tradeoffs**
+- Do NOT write comments that restate the code, narrate assignments, or explain obvious syntax
+- Do NOT leave vague `TODO` without context — explain what and why
+- Document every `unsafe` block with a `// SAFETY:` comment
+- Prefer self-documenting code (good names, small functions) over comment-heavy code
+
+### Strict Types
+- Prefer compile-time guarantees over runtime interpretation
+- Make invalid states unrepresentable: enums, newtypes, constructors, validated inputs
+- No stringly-typed state — use enums where a finite set of values exists
+- `Result` when callers need failure info; `Option` only when absence is the whole story
+- Types encode intent: enums over strings, newtypes over raw primitives
+
+### Error Handling — Clear, Concise, Contextual
 - `thiserror` for typed library errors; `anyhow` only at binary/orchestration boundaries
 - No `unwrap()`/`expect()` in production without strong invariant + comment
 - `Option` only when absence is the whole story; panics for programmer bugs only
+- Return specific error types from internal APIs — never `String`
+- Add context to errors: which operation failed, with what input
 
 ### Concurrency
 - Only when it materially helps; ownership transfer or message passing preferred
 - Never hold a lock across `.await`; no detached tasks without shutdown path
 - Match existing async runtime (tokio); `spawn_blocking` for blocking work in async
 
-### Testing
-- ATDD first for user-visible changes; TDD for next increment
+### Testing — TDD and ATDD are MANDATORY
+- **ATDD first**: define the acceptance scenario before writing implementation code
+- **TDD for every increment**: write the smallest failing test → implement minimally → refactor while green
+- Every meaningful change covers: happy path, invalid input, edge cases, failure paths
 - `#[cfg(test)] mod tests { use super::*; ... }` for unit tests; `tests/` for integration
 - Behavior-focused tests; deterministic seams; no sleep-based flakiness
+- Add concurrency tests when async/locking/task behavior can fail
 - Doctests and examples for public APIs; test relevant feature combinations
+- **No code ships without tests. No exceptions.**
 
-Minimum gate:
+### Linting and Static Analysis — Part of Development
+- Run `cargo fmt --all` before every commit
+- Run `cargo clippy --all-targets --all-features -- -D warnings` — treat warnings as errors
+- Run `cargo test --workspace` — all tests must pass
+- When public APIs change: also run `cargo test --doc`, `cargo doc --no-deps`
+- Do not silence lints casually; fix the code or document why the lint is wrong
+- Prefer narrowly scoped `#[expect(...)]` with rationale over broad `#[allow(...)]`
+
+Minimum gate (MUST pass before every commit):
 
 ```sh
 cargo fmt --all
@@ -126,7 +191,7 @@ cargo nextest run          # or cargo test
 ```
 
 ### Review rejects
-Unnecessary deps, speculative abstractions, hidden coupling, hardcoded values, `unwrap()` in prod, undocumented `unsafe`, detached tasks, lock across `.await`, blocking in async, stringly typed state, transport in domain, missing tests, missing public docs, secrets in code.
+Unnecessary deps, speculative abstractions, hidden coupling, hardcoded values, `unwrap()` in prod, undocumented `unsafe`, detached tasks, lock across `.await`, blocking in async, stringly typed state, transport in domain, missing tests, missing public docs, secrets in code, functions mixing validation + orchestration + persistence, trait-per-struct without consumer need, comments that restate code, globals or singletons.
 
 ## File Layout
 
