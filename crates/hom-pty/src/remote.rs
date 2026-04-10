@@ -37,22 +37,21 @@ impl SshAuthMethod {
 
 /// A live SSH session + channel for one remote pane.
 ///
-/// `ssh2::Channel` contains an `Arc<ChannelInner>` and is internally `Send`.
 /// The `Session` and `TcpStream` are stored here to keep them alive for the
 /// duration of the channel (libssh2 requires the underlying TCP connection to
 /// remain open while a channel is in use).
 pub struct RemoteSession {
     /// SSH channel providing Read + Write access to the remote PTY.
-    pub channel: ssh2::Channel,
+    pub(crate) channel: ssh2::Channel,
     // Keep the session and TCP stream alive alongside the channel.
     _session: Session,
     _tcp: TcpStream,
 }
 
-// SAFETY: RemoteSession is only accessed from the single-threaded TUI event
-// loop.  ssh2::Channel, Session, and TcpStream all use Arc<Mutex<...>>
-// internally, so concurrent access is safe; the marker just tells Rust it's
-// OK to move this struct across threads (e.g., into a tokio spawn_blocking).
+// SAFETY: RemoteSession is only accessed from the single-threaded TUI event loop.
+// No concurrent access to the ssh2 session or channel ever occurs.
+// ssh2 types are not Send in their public API; this impl is sound only because
+// the event loop guarantees exclusive access.
 unsafe impl Send for RemoteSession {}
 
 /// Manages all active remote PTY sessions.
@@ -130,8 +129,9 @@ impl RemotePtyManager {
             .exec(command)
             .map_err(|e| HomError::PtyError(format!("SSH channel exec failed: {e}")))?;
 
-        // Clone the channel to get an independent Read handle for AsyncPtyReader.
-        // ssh2::Channel is Clone (Arc-backed); both handles share the same channel.
+        // Both reader and stored channel share the same Arc-backed ssh2::Channel.
+        // The reader is consumed by AsyncPtyReader for output; the stored handle
+        // is used by write_to(), resize(), and kill() for input and control.
         let reader: Box<dyn std::io::Read + Send> = Box::new(channel.clone());
 
         let id = self.next_id;
@@ -159,7 +159,10 @@ impl RemotePtyManager {
                         && agent.connect().is_ok()
                         && agent.list_identities().is_ok()
                     {
-                        for identity in agent.identities().unwrap_or_default() {
+                        for identity in agent.identities().unwrap_or_else(|e| {
+                            debug!("SSH agent identities() failed: {e}");
+                            vec![]
+                        }) {
                             if agent.userauth(user, &identity).is_ok()
                                 && session.authenticated()
                             {
@@ -235,14 +238,16 @@ impl RemotePtyManager {
     /// Close all remote sessions. Called during App::shutdown().
     pub fn kill_all(&mut self) {
         let ids: Vec<PaneId> = self.sessions.keys().copied().collect();
-        for id in ids {
-            if let Some(mut s) = self.sessions.remove(&id)
+        for id in &ids {
+            if let Some(mut s) = self.sessions.remove(id)
                 && let Err(e) = s.channel.send_eof()
             {
                 debug!(pane_id = id, error = %e, "send_eof failed during kill_all");
             }
         }
-        info!("all remote PTY sessions closed");
+        if !ids.is_empty() {
+            info!("all remote PTY sessions closed");
+        }
     }
 
     /// Returns all active remote pane IDs.
