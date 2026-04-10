@@ -41,6 +41,10 @@ struct Cli {
     #[arg(long = "var", value_parser = parse_var)]
     vars: Vec<(String, String)>,
 
+    /// Run without database (disables session save, cost tracking, workflow checkpoints)
+    #[arg(long)]
+    no_db: bool,
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -86,18 +90,27 @@ async fn main() -> anyhow::Result<()> {
     // Create app
     let mut app = App::new(config);
 
-    // Open database
-    let db_path = app.config.db_path();
-    match hom_db::HomDb::open(db_path.to_str().unwrap_or("hom.db")).await {
-        Ok(db) => {
-            let db = std::sync::Arc::new(db);
-            app.db = Some(db.clone());
-            info!(path = %db_path.display(), "database opened");
-        }
-        Err(e) => {
-            // Non-fatal — run without persistence
-            tracing::warn!(error = %e, "failed to open database, running without persistence");
-        }
+    // Open database (required unless --no-db)
+    if cli.no_db {
+        info!("running without database (--no-db)");
+        app.command_bar.last_error = Some("running without database (--no-db)".to_string());
+    } else {
+        let db_path = app.config.db_path();
+        let db = hom_db::HomDb::open(db_path.to_str().unwrap_or("hom.db"))
+            .await
+            .map_err(|e| {
+                // Restore terminal before showing error
+                let _ = disable_raw_mode();
+                let _ = execute!(io::stdout(), LeaveAlternateScreen);
+                anyhow::anyhow!(
+                    "Failed to open database at {}: {e}\n\
+                     Use --no-db to run without persistence.",
+                    db_path.display()
+                )
+            })?;
+        let db = std::sync::Arc::new(db);
+        app.db = Some(db.clone());
+        info!(path = %db_path.display(), "database opened");
     }
 
     // Use render FPS from config
