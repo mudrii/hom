@@ -27,7 +27,7 @@ impl WebServer {
         WebServer { port, tx, input_tx }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self) -> anyhow::Result<()> {
         let state = AppState { tx: self.tx, input_tx: self.input_tx };
         let app = Router::new()
             .route("/", get(serve_viewer))
@@ -37,8 +37,11 @@ impl WebServer {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], self.port));
         info!("HOM web view at http://{addr}");
 
-        let listener = tokio::net::TcpListener::bind(addr).await.expect("bind web server");
-        axum::serve(listener, app).await.expect("web server error");
+        let listener = tokio::net::TcpListener::bind(addr).await
+            .map_err(|e| anyhow::anyhow!("web server bind on port {}: {e}", self.port))?;
+        axum::serve(listener, app).await
+            .map_err(|e| anyhow::anyhow!("web server error: {e}"))?;
+        Ok(())
     }
 }
 

@@ -584,6 +584,29 @@ impl App {
             return;
         }
 
+        fn xterm256_to_rgb(i: u8) -> u32 {
+            // Standard xterm 256-color palette
+            match i {
+                0..=15 => [
+                    0x00_00_00, 0xCC_00_00, 0x00_CC_00, 0xCC_CC_00,
+                    0x00_00_CC, 0xCC_00_CC, 0x00_CC_CC, 0xCC_CC_CC,
+                    0x55_55_55, 0xFF_55_55, 0x55_FF_55, 0xFF_FF_55,
+                    0x55_55_FF, 0xFF_55_FF, 0x55_FF_FF, 0xFF_FF_FF,
+                ][i as usize],
+                16..=231 => {
+                    let v = i - 16;
+                    let b = (v % 6) * 51;
+                    let g = ((v / 6) % 6) * 51;
+                    let r = (v / 36) * 51;
+                    (r as u32) << 16 | (g as u32) << 8 | b as u32
+                }
+                232..=255 => {
+                    let gray = 8 + (i - 232) * 10;
+                    (gray as u32) << 16 | (gray as u32) << 8 | gray as u32
+                }
+            }
+        }
+
         let panes: Vec<WebPane> = self
             .panes
             .iter()
@@ -597,10 +620,25 @@ impl App {
                             use hom_core::TermColor;
                             let to_rgb = |c: &TermColor| -> u32 {
                                 match c {
-                                    TermColor::Rgb(r, g, b) => {
-                                        (*r as u32) << 16 | (*g as u32) << 8 | *b as u32
-                                    }
-                                    _ => 0xFF_FF_FF,
+                                    TermColor::Rgb(r, g, b) => (*r as u32) << 16 | (*g as u32) << 8 | *b as u32,
+                                    TermColor::Black         => 0x00_00_00,
+                                    TermColor::Red           => 0xCC_00_00,
+                                    TermColor::Green         => 0x00_CC_00,
+                                    TermColor::Yellow        => 0xCC_CC_00,
+                                    TermColor::Blue          => 0x00_00_CC,
+                                    TermColor::Magenta       => 0xCC_00_CC,
+                                    TermColor::Cyan          => 0x00_CC_CC,
+                                    TermColor::White         => 0xCC_CC_CC,
+                                    TermColor::BrightBlack   => 0x55_55_55,
+                                    TermColor::BrightRed     => 0xFF_55_55,
+                                    TermColor::BrightGreen   => 0x55_FF_55,
+                                    TermColor::BrightYellow  => 0xFF_FF_55,
+                                    TermColor::BrightBlue    => 0x55_55_FF,
+                                    TermColor::BrightMagenta => 0xFF_55_FF,
+                                    TermColor::BrightCyan    => 0x55_FF_FF,
+                                    TermColor::BrightWhite   => 0xFF_FF_FF,
+                                    TermColor::Indexed(i)    => xterm256_to_rgb(*i),
+                                    TermColor::Default       => 0xFF_FF_FF,
                                 }
                             };
                             WebCell {
@@ -664,7 +702,9 @@ impl App {
                                 ))
                             })
                             .unwrap_or_else(|| format!("{}\n", input.text).into_bytes());
-                        let _ = self.pty_manager.write_to(id, &bytes);
+                        if let Err(e) = self.pty_manager.write_to(id, &bytes) {
+                            tracing::warn!(pane_id = %id, "web input: PTY write failed: {e}");
+                        }
                     }
                 }
                 Err(_) => {

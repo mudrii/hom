@@ -119,11 +119,16 @@ async fn main() -> anyhow::Result<()> {
     // Start web viewer if --web flag is set.
     // Serves a Canvas2D live view of all panes at http://localhost:<web-port>.
     if cli.web {
+        // Initial receiver dropped — WebSocket clients subscribe via tx.subscribe() at connect time.
         let (web_tx, _) = tokio::sync::broadcast::channel(8);
         let (web_input_tx, web_input_rx) = tokio::sync::mpsc::channel(64);
         app.web_tx = Some(web_tx.clone());
         app.web_input_rx = Some(web_input_rx);
-        tokio::spawn(hom_web::WebServer::new(cli.web_port, web_tx, web_input_tx).run());
+        let _web_handle = tokio::spawn(async move {
+            if let Err(e) = hom_web::WebServer::new(cli.web_port, web_tx, web_input_tx).run().await {
+                tracing::error!("Web server failed: {e}");
+            }
+        });
         tracing::info!("Web view at http://localhost:{}", cli.web_port);
     }
 
