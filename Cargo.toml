@@ -13,8 +13,12 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 authors = ["HOM Contributors"]
+repository = "https://github.com/mudrii/hom"
+description = "TUI terminal multiplexer and orchestrator for 7 AI coding agent CLIs"
+keywords = ["tui", "ai-coding", "terminal", "orchestrator", "multiplexer"]
+categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.85"
 
 [workspace.dependencies]
@@ -74,6 +78,11 @@ async-trait = "0.1"
 name = "hom"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
