@@ -90,6 +90,17 @@ async fn main() -> anyhow::Result<()> {
     // Create app
     let mut app = App::new(config);
 
+    // Validate keybinding strings — warn the user about any invalid entries.
+    // Invalid entries silently fall back to defaults, which is confusing.
+    {
+        let errors = hom_tui::input::validate_keybindings(&app.config.keybindings);
+        if !errors.is_empty() {
+            let msg = errors.join("; ");
+            warn!(keybinding_errors = %msg, "invalid keybinding config");
+            app.command_bar.last_error = Some(format!("keybinding config warning: {msg}"));
+        }
+    }
+
     // Open database (required unless --no-db)
     if cli.no_db {
         info!("running without database (--no-db)");

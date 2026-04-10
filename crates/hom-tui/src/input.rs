@@ -192,6 +192,34 @@ impl Default for InputRouter {
     }
 }
 
+/// Validate all keybinding strings in a `KeybindingsConfig`.
+///
+/// Returns a list of error descriptions. An empty list means all bindings
+/// are valid. Each error names the field and the invalid string so the
+/// user knows exactly what to fix in their config.
+pub fn validate_keybindings(config: &hom_core::KeybindingsConfig) -> Vec<String> {
+    let fields = [
+        ("toggle_command_bar", &config.toggle_command_bar),
+        ("next_pane", &config.next_pane),
+        ("prev_pane", &config.prev_pane),
+        ("kill_pane", &config.kill_pane),
+    ];
+
+    fields
+        .iter()
+        .filter_map(|(name, value)| {
+            if parse_keybinding(value).is_none() {
+                Some(format!(
+                    "invalid keybinding for '{name}': {:?} (expected e.g. 'ctrl-`', 'ctrl-tab', 'f1')",
+                    value
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn matches_keybinding(ke: &KeyEvent, kb: &Keybinding) -> bool {
     ke.code == kb.code && ke.modifiers.contains(kb.modifiers)
 }
@@ -299,6 +327,33 @@ mod tests {
     fn test_parse_invalid() {
         assert!(parse_keybinding("").is_none());
         assert!(parse_keybinding("mega-x").is_none());
+    }
+
+    #[test]
+    fn test_validate_valid_keybindings() {
+        use hom_core::KeybindingsConfig;
+        let config = KeybindingsConfig::default();
+        let errors = validate_keybindings(&config);
+        assert!(
+            errors.is_empty(),
+            "default config should produce no validation errors, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_invalid_keybinding() {
+        use hom_core::KeybindingsConfig;
+        let mut config = KeybindingsConfig::default();
+        config.toggle_command_bar = "mega-x".to_string(); // invalid modifier
+        let errors = validate_keybindings(&config);
+        assert!(
+            !errors.is_empty(),
+            "invalid keybinding should produce at least one error"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("toggle_command_bar")),
+            "error should name the field, got: {errors:?}"
+        );
     }
 
     #[test]
