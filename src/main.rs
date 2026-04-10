@@ -453,6 +453,7 @@ fn handle_command(
             model,
             working_dir,
             extra_args,
+            remote: _,
         } => {
             let cols = terminal_size.width.saturating_sub(2);
             let rows = terminal_size.height.saturating_sub(6);

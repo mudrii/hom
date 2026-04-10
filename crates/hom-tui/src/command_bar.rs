@@ -5,17 +5,19 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use hom_core::{HarnessType, LayoutKind, PaneId};
+use hom_core::{HarnessType, LayoutKind, PaneId, RemoteTarget};
 
 /// Parsed command from the command bar.
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// `:spawn claude opus`
+    /// `:spawn claude [--model opus] [--dir /path] [--remote user@host[:port]]`
     Spawn {
         harness: HarnessType,
         model: Option<String>,
         working_dir: Option<PathBuf>,
         extra_args: Vec<String>,
+        /// SSH remote target. `None` means local spawn.
+        remote: Option<RemoteTarget>,
     },
     /// `:focus 1` or `:focus claude`
     Focus(PaneSelector),
@@ -169,6 +171,13 @@ impl Default for CommandBar {
     }
 }
 
+impl CommandBar {
+    /// Parse a command string — public entry point used in tests and external callers.
+    pub fn parse_command(input: &str) -> Result<Command, String> {
+        parse_command(input)
+    }
+}
+
 /// Split a string respecting single and double quotes.
 ///
 /// `"hello world" foo 'bar baz'` → `["hello world", "foo", "bar baz"]`
@@ -224,10 +233,11 @@ fn parse_command(input: &str) -> Result<Command, String> {
             let harness = HarnessType::from_str_loose(parts[1])
                 .ok_or_else(|| format!("unknown harness: {}", parts[1]))?;
 
-            // Parse the rest (parts[2]) for model, --dir, and extra args
+            // Parse the rest (parts[2]) for model, --dir, --remote, and extra args
             let mut model: Option<String> = None;
             let mut working_dir: Option<PathBuf> = None;
             let mut extra_args: Vec<String> = Vec::new();
+            let mut remote: Option<RemoteTarget> = None;
 
             if let Some(rest) = parts.get(2) {
                 let tokens = shell_split(rest);
@@ -248,6 +258,16 @@ fn parse_command(input: &str) -> Result<Command, String> {
                         } else {
                             return Err("--dir requires a path".to_string());
                         }
+                    } else if tokens[i] == "--remote" {
+                        if i + 1 < tokens.len() {
+                            remote = Some(
+                                RemoteTarget::parse(&tokens[i + 1])
+                                    .ok_or_else(|| format!("invalid remote target: {}", tokens[i + 1]))?,
+                            );
+                            i += 2;
+                        } else {
+                            return Err("--remote requires user@host[:port]".to_string());
+                        }
                     } else if model.is_none() {
                         model = Some(tokens[i].clone());
                         i += 1;
@@ -264,6 +284,7 @@ fn parse_command(input: &str) -> Result<Command, String> {
                 model,
                 working_dir,
                 extra_args,
+                remote,
             })
         }
         Some("focus") | Some("f") => {
@@ -403,6 +424,46 @@ fn parse_command(input: &str) -> Result<Command, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_parses_remote_flag_user_at_host() {
+        let cmd =
+            CommandBar::parse_command("spawn claude --remote alice@build.example.com").unwrap();
+        match cmd {
+            Command::Spawn {
+                harness, remote, ..
+            } => {
+                assert_eq!(harness, HarnessType::ClaudeCode);
+                let t = remote.unwrap();
+                assert_eq!(t.user, "alice");
+                assert_eq!(t.host, "build.example.com");
+                assert_eq!(t.port, 22);
+            }
+            _ => panic!("expected Spawn"),
+        }
+    }
+
+    #[test]
+    fn spawn_parses_remote_flag_with_port() {
+        let cmd =
+            CommandBar::parse_command("spawn claude --remote bob@10.0.0.5:2222").unwrap();
+        match cmd {
+            Command::Spawn { remote, .. } => {
+                let t = remote.unwrap();
+                assert_eq!(t.port, 2222);
+            }
+            _ => panic!("expected Spawn"),
+        }
+    }
+
+    #[test]
+    fn spawn_without_remote_has_none() {
+        let cmd = CommandBar::parse_command("spawn claude").unwrap();
+        match cmd {
+            Command::Spawn { remote, .. } => assert!(remote.is_none()),
+            _ => panic!("expected Spawn"),
+        }
+    }
 
     #[test]
     fn shell_split_basic() {
