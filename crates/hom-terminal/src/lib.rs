@@ -1,14 +1,14 @@
 //! # hom-terminal
 //!
 //! Terminal emulation layer for HOM. Provides a `TerminalBackend` implementation
-//! that can be swapped between vt100 (current default) and libghostty-rs (target).
+//! that can be swapped between ghostty (default) and vt100 (opt-in fallback).
 //!
 //! ## Feature flags
 //!
-//! - `vt100-backend` (default): Use the `vt100` crate. No external build deps.
-//! - `ghostty-backend`: Use `libghostty-rs`. Requires Zig ≥0.15.x at build time.
-//!   Fully implemented with `libghostty-vt 0.1.1`. Requires Zig ≥0.15.x at
-//!   build time (the Zig toolchain compiles Ghostty's C VT library).
+//! - `ghostty-backend` (default): Use `libghostty-vt 0.1.1`. Requires Zig ≥0.15.x
+//!   at build time (the Zig toolchain compiles Ghostty's C VT library).
+//! - `vt100-backend` (opt-in fallback): Use the `vt100` crate. No external build deps.
+//!   Enable with: `cargo build --no-default-features --features vt100-backend`
 
 pub mod color_map;
 
@@ -29,7 +29,7 @@ pub type ActiveBackend = fallback_vt100::Vt100Backend;
 // Fail at compile time if neither backend is enabled
 #[cfg(not(any(feature = "vt100-backend", feature = "ghostty-backend")))]
 compile_error!(
-    "hom-terminal requires at least one backend feature: `vt100-backend` (default) or `ghostty-backend`"
+    "hom-terminal requires at least one backend feature: `ghostty-backend` (default) or `vt100-backend` (opt-in fallback: --no-default-features --features vt100-backend)"
 );
 
 /// Convenience constructor: create a terminal with the active backend.

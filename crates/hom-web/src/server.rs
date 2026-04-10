@@ -1,14 +1,17 @@
 use axum::{
     Router,
-    extract::{State, WebSocketUpgrade},
     extract::ws::{Message, WebSocket},
+    extract::{State, WebSocketUpgrade},
     response::{Html, IntoResponse},
     routing::get,
 };
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
-use crate::{frame::{WebFrame, WebInput}, viewer::VIEWER_HTML};
+use crate::{
+    frame::{WebFrame, WebInput},
+    viewer::VIEWER_HTML,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -23,12 +26,19 @@ pub struct WebServer {
 }
 
 impl WebServer {
-    pub fn new(port: u16, tx: broadcast::Sender<WebFrame>, input_tx: mpsc::Sender<WebInput>) -> Self {
+    pub fn new(
+        port: u16,
+        tx: broadcast::Sender<WebFrame>,
+        input_tx: mpsc::Sender<WebInput>,
+    ) -> Self {
         WebServer { port, tx, input_tx }
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        let state = AppState { tx: self.tx, input_tx: self.input_tx };
+        let state = AppState {
+            tx: self.tx,
+            input_tx: self.input_tx,
+        };
         let app = Router::new()
             .route("/", get(serve_viewer))
             .route("/ws", get(ws_handler))
@@ -37,9 +47,11 @@ impl WebServer {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], self.port));
         info!("HOM web view at http://{addr}");
 
-        let listener = tokio::net::TcpListener::bind(addr).await
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
             .map_err(|e| anyhow::anyhow!("web server bind on port {}: {e}", self.port))?;
-        axum::serve(listener, app).await
+        axum::serve(listener, app)
+            .await
             .map_err(|e| anyhow::anyhow!("web server error: {e}"))?;
         Ok(())
     }

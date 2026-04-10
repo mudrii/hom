@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WebCell {
     pub ch: char,
-    pub fg: u32,   // RRGGBB packed, 0xFFFFFF = terminal default
+    pub fg: u32, // RRGGBB packed, 0xFFFFFF = terminal default
     pub bg: u32,
     pub bold: bool,
     pub italic: bool,
@@ -13,7 +13,14 @@ pub struct WebCell {
 
 impl Default for WebCell {
     fn default() -> Self {
-        WebCell { ch: ' ', fg: 0xFF_FF_FF, bg: 0x00_00_00, bold: false, italic: false, underline: false }
+        WebCell {
+            ch: ' ',
+            fg: 0xFF_FF_FF,
+            bg: 0x00_00_00,
+            bold: false,
+            italic: false,
+            underline: false,
+        }
     }
 }
 
@@ -34,7 +41,7 @@ pub struct WebPane {
 /// A full frame pushed to all WebSocket clients after each render tick.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebFrame {
-    pub ts: u64,   // Unix ms
+    pub ts: u64, // Unix ms
     pub panes: Vec<WebPane>,
 }
 
@@ -98,8 +105,12 @@ mod tests {
     #[test]
     fn webframe_cell_grid_is_row_major() {
         let pane = WebPane {
-            pane_id: "p0".into(), title: "test".into(),
-            cols: 10, rows: 5, cursor_col: 3, cursor_row: 1,
+            pane_id: "p0".into(),
+            title: "test".into(),
+            cols: 10,
+            rows: 5,
+            cursor_col: 3,
+            cursor_row: 1,
             cells: vec![WebCell::default(); 10 * 5],
             focused: false,
         };

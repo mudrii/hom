@@ -51,26 +51,26 @@ Defined in `crates/hom-core/src/traits.rs`. Any terminal emulator must implement
 | `cursor()` | Return cursor position and visibility | Cursor in wrong place |
 | `title()` | Return window title set by child process | Cosmetic only |
 
-## libghostty-rs Integration (Feature: `ghostty-backend`)
+## libghostty-rs Integration (Feature: `ghostty-backend`, DEFAULT)
 
-**Current status:** Stubbed in `ghostty.rs`. The feature flag exists but the implementation is placeholder.
+**Current status:** Fully implemented in `ghostty.rs`. This is the default backend.
 
-**To enable:**
-
-1. Install Zig ≥0.15.x: `curl -L https://ziglang.org/download/0.15.0/zig-linux-x86_64-0.15.0.tar.xz | tar -xJ`
-2. Uncomment `libghostty-vt` in workspace `Cargo.toml`
-3. Pin to a specific commit: `rev = "<commit-hash>"`
-4. Uncomment the feature flag in `crates/hom-terminal/Cargo.toml`
-5. Implement `GhosttyBackend`:
-   - Map `libghostty_vt::Terminal` screen cells to our `Cell` type
-   - Map ghostty colors to `TermColor`
-   - Map ghostty attributes to `CellAttributes`
+**To build (default):**
+```sh
+cargo build   # ghostty-backend is the default feature
+```
+Requires Zig ≥0.15.x at build time. Install Zig: `brew install zig` or download from ziglang.org.
 
 **Critical risk:** libghostty-rs is v0.1.1, pre-1.0. Pin commits. The API WILL change.
 
-## vt100 Backend (Default)
+## vt100 Backend (Opt-in fallback: `vt100-backend`)
 
-The working fallback in `fallback_vt100.rs`. Uses the `vt100` crate (v0.16).
+The opt-in fallback in `fallback_vt100.rs`. Uses the `vt100` crate (v0.16).
+
+**To build with vt100 fallback (no Zig required):**
+```sh
+cargo build --no-default-features --features vt100-backend
+```
 
 **Known limitations:**
 - No Kitty graphics protocol
@@ -145,8 +145,8 @@ fn test_resize() {
 
 ## Checklist Before Committing
 
-- [ ] `cargo check` passes with default features (vt100)
-- [ ] `cargo check --features ghostty-backend --no-default-features` passes (if ghostty available)
+- [ ] `cargo check` passes with default features (ghostty)
+- [ ] `cargo check --no-default-features --features vt100-backend` passes (vt100 fallback path)
 - [ ] Terminal emulation tests pass: `cargo test -p hom-terminal`
 - [ ] PTY tests pass: `cargo test -p hom-pty`
 - [ ] Color mapping covers all `TermColor` variants

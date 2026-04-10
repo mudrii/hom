@@ -3,6 +3,8 @@ name = "hom-db"
 version.workspace = true
 edition.workspace = true
 description = "SQLite storage layer for HOM — workflows, sessions, cost tracking"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 hom-core.workspace = true

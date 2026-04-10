@@ -1,8 +1,8 @@
+use hom_core::types::McpRequest;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
-use hom_core::types::McpRequest;
 
 use crate::{
     handler::handle_tool_call,
@@ -91,9 +91,7 @@ impl McpServer {
             "tools/call" => {
                 let tool_name = match req.params["name"].as_str() {
                     Some(n) => n,
-                    None => {
-                        return RpcResponse::err(id, -32602, "tools/call: 'name' is required")
-                    }
+                    None => return RpcResponse::err(id, -32602, "tools/call: 'name' is required"),
                 };
                 let args = &req.params["arguments"];
                 match handle_tool_call(tool_name, args, &self.tx).await {

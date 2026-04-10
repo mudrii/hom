@@ -2,12 +2,14 @@
 name = "hom-terminal"
 version.workspace = true
 edition.workspace = true
-description = "Terminal emulation layer for HOM (vt100 default, libghostty-rs optional)"
+description = "Terminal emulation layer for HOM (ghostty default, vt100 opt-in fallback)"
+license.workspace = true
+repository.workspace = true
 
 [features]
-default = ["vt100-backend"]
-# ghostty-backend requires Zig ≥0.15.x at build time.
-# Build with: cargo build --features ghostty-backend
+default = ["ghostty-backend"]
+# vt100-backend is the opt-in fallback for environments without Zig ≥0.15.x.
+# Build with: cargo build --no-default-features --features vt100-backend
 ghostty-backend = ["dep:libghostty-vt"]
 vt100-backend = ["dep:vt100"]
 

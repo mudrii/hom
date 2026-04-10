@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Returns the list of tools exposed by the HOM MCP server.
 /// Each entry matches the MCP tools/list response format.
@@ -128,8 +128,12 @@ mod tests {
     #[test]
     fn spawn_pane_requires_harness() {
         let list = tool_list();
-        let spawn = list["tools"].as_array().unwrap()
-            .iter().find(|t| t["name"] == "spawn_pane").unwrap();
+        let spawn = list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "spawn_pane")
+            .unwrap();
         let required = spawn["inputSchema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "harness"));
     }

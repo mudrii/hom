@@ -301,12 +301,26 @@ pub struct McpRequest {
 /// The action the MCP server wants the app to perform.
 #[derive(Debug)]
 pub enum McpCommand {
-    SpawnPane { harness: String, model: Option<String> },
-    SendToPane { pane_id: String, text: String },
-    RunWorkflow { path: String, vars: std::collections::HashMap<String, String> },
+    SpawnPane {
+        harness: String,
+        model: Option<String>,
+    },
+    SendToPane {
+        pane_id: String,
+        text: String,
+    },
+    RunWorkflow {
+        path: String,
+        vars: std::collections::HashMap<String, String>,
+    },
     ListPanes,
-    GetPaneOutput { pane_id: String, lines: usize },
-    KillPane { pane_id: String },
+    GetPaneOutput {
+        pane_id: String,
+        lines: usize,
+    },
+    KillPane {
+        pane_id: String,
+    },
 }
 
 /// The result the app sends back to the MCP server.

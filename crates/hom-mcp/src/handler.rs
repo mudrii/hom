@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
 use hom_core::types::{McpCommand, McpRequest};
+use serde_json::Value;
+use std::collections::HashMap;
+use tokio::sync::{mpsc, oneshot};
 
 /// Parse the `arguments` field from a tools/call request and dispatch
 /// to the app via the McpRequest channel.
@@ -14,9 +14,16 @@ pub async fn handle_tool_call(
 ) -> Result<Value, String> {
     let command = parse_command(tool_name, args)?;
     let (reply_tx, reply_rx) = oneshot::channel();
-    let req = McpRequest { command, reply: reply_tx };
-    tx.send(req).await.map_err(|_| "App channel closed".to_string())?;
-    let response = reply_rx.await.map_err(|_| "App dropped reply channel".to_string())?;
+    let req = McpRequest {
+        command,
+        reply: reply_tx,
+    };
+    tx.send(req)
+        .await
+        .map_err(|_| "App channel closed".to_string())?;
+    let response = reply_rx
+        .await
+        .map_err(|_| "App dropped reply channel".to_string())?;
     Ok(serde_json::to_value(response).unwrap_or(Value::Null))
 }
 
@@ -85,8 +92,10 @@ mod tests {
     fn parse_spawn_pane_with_model() {
         let args = json!({"harness": "claude", "model": "claude-opus-4-5"});
         let cmd = parse_command("spawn_pane", &args).unwrap();
-        assert!(matches!(cmd, McpCommand::SpawnPane { ref harness, ref model }
-            if harness == "claude" && model.as_deref() == Some("claude-opus-4-5")));
+        assert!(
+            matches!(cmd, McpCommand::SpawnPane { ref harness, ref model }
+            if harness == "claude" && model.as_deref() == Some("claude-opus-4-5"))
+        );
     }
 
     #[test]

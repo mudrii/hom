@@ -3,6 +3,8 @@ name = "hom-workflow"
 version.workspace = true
 edition.workspace = true
 description = "YAML-driven DAG workflow engine for HOM orchestrator"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 hom-core.workspace = true
