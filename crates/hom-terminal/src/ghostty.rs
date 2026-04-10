@@ -10,8 +10,8 @@
 use libghostty_vt::{
     ffi::GhosttyPointCoordinate,
     style::{StyleColor, Underline},
-    terminal::Point,
-    Options as TerminalOptions, Terminal,
+    terminal::{Options as TerminalOptions, Point},
+    Terminal,
 };
 
 #[cfg(feature = "ghostty-backend")]
@@ -70,7 +70,8 @@ impl TerminalBackend for GhosttyBackend {
 
     fn screen_snapshot(&self) -> ScreenSnapshot {
         let mut rows = Vec::with_capacity(self.rows as usize);
-        let mut grapheme_buf = String::new();
+        // Buffer for grapheme cluster chars — most cells are single chars, allow up to 4.
+        let mut char_buf = [' '; 4];
 
         for row_idx in 0..self.rows {
             let mut row_cells = Vec::with_capacity(self.cols as usize);
@@ -86,10 +87,9 @@ impl TerminalBackend for GhosttyBackend {
 
                 let cell = match self.terminal.grid_ref(point) {
                     Ok(grid_ref) => {
-                        grapheme_buf.clear();
-                        let character = match grid_ref.graphemes(&mut grapheme_buf) {
-                            Ok(_) => grapheme_buf.chars().next().unwrap_or(' '),
-                            Err(_) => ' ',
+                        let character = match grid_ref.graphemes(&mut char_buf) {
+                            Ok(n) if n > 0 => char_buf[0],
+                            _ => ' ',
                         };
                         let (fg, bg, attrs) = match grid_ref.style() {
                             Ok(style) => (
@@ -175,7 +175,7 @@ fn map_style_color(color: StyleColor) -> TermColor {
 #[cfg(all(test, feature = "ghostty-backend"))]
 mod tests {
     use super::*;
-    use hom_core::traits::TerminalBackend as _;
+
 
     #[test]
     fn test_new_creates_correct_dimensions() {
