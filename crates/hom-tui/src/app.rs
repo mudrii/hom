@@ -339,4 +339,62 @@ impl App {
             }
         }
     }
+
+    /// Serialize the current session (layout + pane configs) for persistence.
+    pub fn session_snapshot(&self) -> (String, String) {
+        let layout_json = serde_json::to_string(&self.layout).unwrap_or_default();
+        let pane_configs: Vec<SessionPaneConfig> = self
+            .pane_order
+            .iter()
+            .filter_map(|id| {
+                self.panes.get(id).map(|pane| SessionPaneConfig {
+                    harness_type: pane.harness_type,
+                    model: pane.model.clone(),
+                })
+            })
+            .collect();
+        let panes_json = serde_json::to_string(&pane_configs).unwrap_or_default();
+        (layout_json, panes_json)
+    }
+}
+
+/// Serializable pane configuration for session save/restore.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionPaneConfig {
+    pub harness_type: HarnessType,
+    pub model: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_pane_config_roundtrip() {
+        let configs = vec![
+            SessionPaneConfig {
+                harness_type: HarnessType::ClaudeCode,
+                model: Some("opus".to_string()),
+            },
+            SessionPaneConfig {
+                harness_type: HarnessType::CodexCli,
+                model: None,
+            },
+        ];
+        let json = serde_json::to_string(&configs).unwrap();
+        let parsed: Vec<SessionPaneConfig> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].harness_type, HarnessType::ClaudeCode);
+        assert_eq!(parsed[0].model, Some("opus".to_string()));
+        assert_eq!(parsed[1].model, None);
+    }
+
+    #[test]
+    fn test_session_snapshot_empty_app() {
+        let app = App::new(HomConfig::default());
+        let (layout, panes) = app.session_snapshot();
+        assert!(!layout.is_empty());
+        let parsed: Vec<SessionPaneConfig> = serde_json::from_str(&panes).unwrap();
+        assert!(parsed.is_empty());
+    }
 }

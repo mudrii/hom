@@ -1,0 +1,24 @@
+[package]
+name = "hom-tui"
+version.workspace = true
+edition.workspace = true
+description = "TUI rendering, input routing, and pane layout management for HOM"
+
+[dependencies]
+hom-core.workspace = true
+hom-terminal.workspace = true
+hom-pty.workspace = true
+hom-adapters.workspace = true
+hom-workflow.workspace = true
+hom-db.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sqlx.workspace = true
