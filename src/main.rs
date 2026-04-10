@@ -136,6 +136,9 @@ async fn main() -> anyhow::Result<()> {
 
     let result = run_app(&mut terminal, &mut app, tick_rate, workflow_rx, bridge).await;
 
+    // Clean up all PTY processes before restoring the terminal
+    app.shutdown();
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;

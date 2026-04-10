@@ -11,6 +11,7 @@ use hom_core::{
 use hom_pty::{AsyncPtyReader, PtyManager};
 use hom_terminal::ActiveBackend;
 use tokio::sync::oneshot;
+use tracing::info;
 
 use crate::command_bar::CommandBar;
 use crate::input::InputRouter;
@@ -378,6 +379,19 @@ impl App {
         let panes_json = serde_json::to_string(&pane_configs).unwrap_or_default();
         (layout_json, panes_json)
     }
+
+    /// Clean shutdown: kill all PTY processes and drain pending completions.
+    pub fn shutdown(&mut self) {
+        for pending in self.pending_completions.drain(..) {
+            let _ = pending
+                .reply
+                .send(Err(hom_core::HomError::Other("shutting down".to_string())));
+        }
+        self.pty_manager.kill_all();
+        self.panes.clear();
+        self.pane_order.clear();
+        info!("app shutdown complete");
+    }
 }
 
 /// Serializable pane configuration for session save/restore.
@@ -418,5 +432,14 @@ mod tests {
         assert!(!layout.is_empty());
         let parsed: Vec<SessionPaneConfig> = serde_json::from_str(&panes).unwrap();
         assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_shutdown_clears_state() {
+        let mut app = App::new(HomConfig::default());
+        app.shutdown();
+        assert!(app.panes.is_empty());
+        assert!(app.pane_order.is_empty());
+        assert!(app.pending_completions.is_empty());
     }
 }

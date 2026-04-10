@@ -175,10 +175,54 @@ impl PtyManager {
     pub fn has_pane(&self, pane_id: PaneId) -> bool {
         self.instances.contains_key(&pane_id)
     }
+
+    /// Kill all active PTY processes. Used during shutdown cleanup.
+    pub fn kill_all(&mut self) {
+        let pane_ids: Vec<PaneId> = self.instances.keys().copied().collect();
+        for pane_id in pane_ids {
+            if let Some(mut instance) = self.instances.remove(&pane_id)
+                && let Err(e) = instance.child.kill()
+            {
+                debug!(pane_id, error = %e, "failed to kill PTY during shutdown");
+            }
+        }
+        info!("all PTY processes killed");
+    }
 }
 
 impl Default for PtyManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kill_all_empties_instances() {
+        let mut mgr = PtyManager::new();
+        let spec = CommandSpec {
+            program: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            env: std::collections::HashMap::new(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        };
+        let id1 = mgr.spawn(&spec, 80, 24).unwrap();
+        let id2 = mgr.spawn(&spec, 80, 24).unwrap();
+        assert_eq!(mgr.active_panes().len(), 2);
+
+        mgr.kill_all();
+        assert!(mgr.active_panes().is_empty());
+        assert!(!mgr.has_pane(id1));
+        assert!(!mgr.has_pane(id2));
+    }
+
+    #[test]
+    fn test_kill_all_on_empty_manager() {
+        let mut mgr = PtyManager::new();
+        mgr.kill_all();
+        assert!(mgr.active_panes().is_empty());
     }
 }
