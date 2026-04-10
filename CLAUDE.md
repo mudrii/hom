@@ -40,6 +40,7 @@ HOM is a Rust-based TUI terminal multiplexer and orchestrator for 7 AI coding ag
 | `hom-tui` | App state, pane rendering, input router, command bar parser, layout engine, status rail |
 | `hom-db` | SQLite via sqlx — workflows, steps, sessions, cost_log |
 | `hom-mcp` | MCP server — JSON-RPC 2.0 over stdin/stdout, 6 tools, `--mcp` flag |
+| `hom-web` | WebSocket HTTP server — Canvas2D live pane viewer, axum 0.8, WebFrame serialisation |
 
 ## Key Technical Decisions
 
@@ -90,6 +91,7 @@ Workspace: add `--workspace` to check/test/nextest/clippy. Feature/doc changes: 
 - `hom-tui` depends on `hom-core`, `hom-terminal`, `hom-pty`, `hom-adapters`, `hom-workflow`, `hom-db`
 - `hom-db` depends on `hom-core` only
 - `hom-mcp` depends on `hom-core` only
+- `hom-web` depends on `hom-core` only
 - The binary (`src/main.rs`) depends on all crates
 
 ### Feature flags
@@ -379,6 +381,14 @@ hom/
 - `--mcp` flag spawns McpServer as a tokio task alongside the TUI
 - McpRequest/McpResponse types in hom-core; channel-based IPC with App
 - RunWorkflow via MCP returns a diagnostic error (WorkflowBridge lives in main.rs — a future refactor can move it into App)
+
+**Resolved (April 11, 2026 — Web UI):**
+- hom-web crate — axum 0.8 WebSocket server on localhost:4242 (--web-port to override)
+- Canvas2D cell rendering in browser — XSS-safe (fillText, no innerHTML); full ANSI 256-color palette
+- Broadcast WebFrame (serialised ScreenSnapshot) to all connected WebSocket clients after each tick
+- Browser keystrokes forwarded to target pane via WebInput channel (pane_id-routed, not just focused pane)
+- WebServer::run() returns anyhow::Result<()> — bind/serve errors propagated and logged, not panicked
+- `hom --web` or `hom --web --web-port 8080`
 
 **No remaining stubs** — all features are implemented. GhosttyBackend runtime validation requires network access during Zig build.
 
