@@ -1,0 +1,650 @@
+//! HOM — AI Harness Orchestration Management TUI
+//!
+//! A Rust-based terminal multiplexer that spawns real AI coding harness TUIs
+//! in visual panes, coordinates inputs/outputs, and executes workflows.
+
+use std::collections::HashMap;
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
+
+use clap::Parser;
+use crossterm::event::{self, Event};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
+
+use hom_core::{HarnessType, HomConfig, TerminalBackend};
+use hom_tui::app::App;
+use hom_tui::input::Action;
+use hom_tui::render::render;
+use hom_tui::workflow_bridge::{WorkflowBridge, WorkflowRequest, WorkflowRequestRx};
+
+#[derive(Parser)]
+#[command(name = "hom", version, about = "AI Harness Orchestrator TUI")]
+struct Cli {
+    /// Path to config file (default: ~/.config/hom/config.toml)
+    #[arg(short, long)]
+    config: Option<String>,
+
+    /// Run a workflow immediately
+    #[arg(short, long)]
+    run: Option<String>,
+
+    /// Set workflow variables (key=value)
+    #[arg(long = "var", value_parser = parse_var)]
+    vars: Vec<(String, String)>,
+
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long, default_value = "info")]
+    log_level: String,
+}
+
+fn parse_var(s: &str) -> Result<(String, String), String> {
+    let parts: Vec<&str> = s.splitn(2, '=').collect();
+    if parts.len() != 2 {
+        return Err(format!("invalid variable format: {s} (expected key=value)"));
+    }
+    Ok((parts[0].to_string(), parts[1].to_string()))
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+        )
+        .with_writer(io::stderr)
+        .init();
+
+    info!("starting HOM");
+
+    // Load configuration
+    let config = if let Some(path) = &cli.config {
+        HomConfig::load_from(std::path::Path::new(path))?
+    } else {
+        HomConfig::load()?
+    };
+
+    // Set up terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    // Create app
+    let mut app = App::new(config);
+
+    // Open database
+    let db_path = app.config.db_path();
+    match hom_db::HomDb::open(db_path.to_str().unwrap_or("hom.db")).await {
+        Ok(db) => {
+            let db = std::sync::Arc::new(db);
+            app.db = Some(db.clone());
+            info!(path = %db_path.display(), "database opened");
+        }
+        Err(e) => {
+            // Non-fatal — run without persistence
+            tracing::warn!(error = %e, "failed to open database, running without persistence");
+        }
+    }
+
+    // Use render FPS from config
+    let fps = app.config.general.render_fps.max(1);
+    let tick_rate = Duration::from_millis(1000 / fps as u64);
+
+    // Create workflow bridge channel for executor ↔ TUI communication
+    let (bridge, workflow_rx) = WorkflowBridge::new();
+    let bridge = Arc::new(bridge);
+
+    // Wire CLI --run/--var: if a workflow was specified, launch it
+    if let Some(workflow_name) = &cli.run {
+        let workflow_dir = app.config.workflow_dir();
+        let workflow_path = workflow_dir.join(format!("{workflow_name}.yaml"));
+        match hom_workflow::WorkflowDef::from_file(&workflow_path) {
+            Ok(def) => {
+                app.workflow_status = Some(format!("running: {workflow_name}"));
+                let variables: HashMap<String, String> = cli.vars.iter().cloned().collect();
+                let db = app.db.clone();
+                let bridge_clone = bridge.clone();
+                let wf_name = workflow_name.clone();
+                tokio::spawn(async move {
+                    run_workflow_task(def, bridge_clone, variables, db, &wf_name).await;
+                });
+                info!(workflow = %workflow_name, vars = ?cli.vars, "workflow launched via CLI");
+            }
+            Err(e) => {
+                warn!(workflow = %workflow_name, error = %e, "failed to load CLI workflow");
+                app.workflow_status = Some(format!("error: {e}"));
+            }
+        }
+    }
+
+    // Store bridge in OnceLock so handle_command can access it for :run
+    let _ = WORKFLOW_BRIDGE.set(bridge);
+
+    let result = run_app(&mut terminal, &mut app, tick_rate, workflow_rx).await;
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    if let Err(e) = result {
+        eprintln!("Error: {e}");
+    }
+
+    info!("HOM exited");
+    Ok(())
+}
+
+async fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    tick_rate: Duration,
+    mut workflow_rx: WorkflowRequestRx,
+) -> anyhow::Result<()> {
+    loop {
+        // Draw
+        terminal.draw(|frame| {
+            render(frame, app);
+        })?;
+
+        // Drain workflow bridge requests (non-blocking)
+        while let Ok(req) = workflow_rx.try_recv() {
+            handle_workflow_request(app, req, terminal.size()?.into());
+        }
+
+        // Poll for events
+        if event::poll(tick_rate)? {
+            let evt = event::read()?;
+
+            // Build pane areas for hit testing
+            let term_size = terminal.size()?;
+            let size = ratatui::layout::Rect::new(0, 0, term_size.width, term_size.height);
+            let pane_areas: Vec<_> = hom_tui::layout::compute_pane_areas(
+                ratatui::layout::Rect {
+                    x: 0,
+                    y: 1,
+                    width: size.width,
+                    height: size.height.saturating_sub(4),
+                },
+                &app.pane_order,
+                &app.layout,
+            );
+
+            // Handle terminal resize events before routing
+            if let Event::Resize(new_cols, new_rows) = &evt {
+                // Recompute per-pane areas using the layout engine, then resize each
+                let pane_area = ratatui::layout::Rect {
+                    x: 0,
+                    y: 1,
+                    width: *new_cols,
+                    height: new_rows.saturating_sub(4),
+                };
+                let new_areas =
+                    hom_tui::layout::compute_pane_areas(pane_area, &app.pane_order, &app.layout);
+                for (pane_id, area) in &new_areas {
+                    let inner_w = area.width.saturating_sub(2);
+                    let inner_h = area.height.saturating_sub(2);
+                    let _ = app.pty_manager.resize(*pane_id, inner_w, inner_h);
+                    if let Some(pane) = app.panes.get_mut(pane_id) {
+                        pane.terminal.resize(inner_w, inner_h);
+                    }
+                }
+            }
+
+            let action = app.input_router.handle_event(evt, &pane_areas);
+
+            match action {
+                Action::Quit => break,
+                Action::WriteToPty(pane_id, bytes) => {
+                    let _ = app.pty_manager.write_to(pane_id, &bytes);
+                }
+                Action::FocusPane(pane_id) => {
+                    app.focused_pane = Some(pane_id);
+                }
+                Action::FocusCommandBar => {
+                    // Already handled by input router
+                }
+                Action::CommandBarInput(key) => {
+                    if let Some(cmd) = app.command_bar.handle_key(key) {
+                        handle_command(app, cmd, size)?;
+                    }
+                }
+                Action::NextPane => app.focus_next(),
+                Action::PrevPane => app.focus_prev(),
+                Action::None => {}
+            }
+        }
+
+        // Poll PTY output and feed into terminal emulators
+        app.poll_pty_output();
+
+        // Check pending workflow completions (detect_completion polling)
+        app.poll_pending_completions();
+
+        // Check for exited processes
+        let pane_ids: Vec<_> = app.pane_order.clone();
+        for pane_id in pane_ids {
+            if let Ok(Some(_exit_code)) = app.pty_manager.try_wait(pane_id) {
+                // Process exited — could mark pane or clean up
+            }
+        }
+
+        if app.should_quit {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Shared Arc<WorkflowBridge> stored by handle_command for :run.
+/// We use a thread-local to avoid changing the handle_command signature,
+/// since the bridge is created once and reused.
+static WORKFLOW_BRIDGE: std::sync::OnceLock<Arc<WorkflowBridge>> = std::sync::OnceLock::new();
+
+fn handle_command(
+    app: &mut App,
+    cmd: hom_tui::command_bar::Command,
+    terminal_size: ratatui::layout::Rect,
+) -> anyhow::Result<()> {
+    use hom_tui::command_bar::Command;
+
+    match cmd {
+        Command::Spawn {
+            harness,
+            model,
+            working_dir,
+            extra_args,
+        } => {
+            let cols = terminal_size.width.saturating_sub(2);
+            let rows = terminal_size.height.saturating_sub(6);
+            match app.spawn_pane_with_opts(harness, model, working_dir, extra_args, cols, rows) {
+                Ok(id) => info!(pane_id = id, "spawned pane"),
+                Err(e) => {
+                    app.command_bar.last_error = Some(format!("{e}"));
+                }
+            }
+        }
+        Command::Kill(selector) => {
+            if let Some(id) = resolve_selector(&selector, app) {
+                let _ = app.kill_pane(id);
+            }
+        }
+        Command::Focus(selector) => {
+            if let Some(id) = resolve_selector(&selector, app) {
+                app.focused_pane = Some(id);
+                app.input_router.focus_pane(id);
+            }
+        }
+        Command::Layout(kind) => {
+            app.layout = kind;
+            // Recompute pane areas and resize PTYs to match new layout
+            let pane_area = ratatui::layout::Rect {
+                x: 0,
+                y: 1,
+                width: terminal_size.width,
+                height: terminal_size.height.saturating_sub(4),
+            };
+            let new_areas =
+                hom_tui::layout::compute_pane_areas(pane_area, &app.pane_order, &app.layout);
+            for (pane_id, area) in &new_areas {
+                let inner_w = area.width.saturating_sub(2);
+                let inner_h = area.height.saturating_sub(2);
+                let _ = app.pty_manager.resize(*pane_id, inner_w, inner_h);
+                if let Some(pane) = app.panes.get_mut(pane_id) {
+                    use hom_core::TerminalBackend;
+                    pane.terminal.resize(inner_w, inner_h);
+                }
+            }
+        }
+        Command::Quit => {
+            app.should_quit = true;
+        }
+        Command::Help => {
+            app.command_bar.last_error = Some(
+                "commands: :spawn :kill :focus :send :pipe :broadcast :run :layout :save :restore :quit".to_string()
+            );
+        }
+        Command::Send { target, input } => {
+            if let Some(id) = resolve_selector(&target, app) {
+                // Use adapter translation so the prompt is formatted correctly
+                // for the target harness (e.g. proper escaping, newline appended).
+                let bytes = if let Some(pane) = app.panes.get(&id) {
+                    let adapter = app.adapter_registry.get(&pane.harness_type);
+                    adapter
+                        .map(|a| {
+                            a.translate_input(&hom_core::OrchestratorCommand::Prompt(input.clone()))
+                        })
+                        .unwrap_or_else(|| format!("{input}\n").into_bytes())
+                } else {
+                    format!("{input}\n").into_bytes()
+                };
+                let _ = app.pty_manager.write_to(id, &bytes);
+                info!(pane_id = id, "sent input to pane");
+            } else {
+                app.command_bar.last_error = Some("pane not found".to_string());
+            }
+        }
+        Command::Pipe { source, target } => {
+            // Pipe: extract structured output from source pane, write to target PTY.
+            // Uses adapter's parse_screen() for structured events when available,
+            // falls back to raw screen text otherwise.
+            let source_id = resolve_selector(&source, app);
+            let target_id = resolve_selector(&target, app);
+            match (source_id, target_id) {
+                (Some(src), Some(tgt)) => {
+                    let output = if let Some(pane) = app.panes.get(&src) {
+                        let snapshot = pane.terminal.screen_snapshot();
+                        // Try adapter's parse_screen() for structured output
+                        let events = app
+                            .adapter_registry
+                            .get(&pane.harness_type)
+                            .map(|a| a.parse_screen(&snapshot))
+                            .unwrap_or_default();
+                        if events.is_empty() {
+                            // Fallback: use last N lines of raw screen text
+                            // (avoids sending blank padding and scroll history)
+                            snapshot.last_n_lines(20)
+                        } else {
+                            // Format structured events as newline-separated text
+                            events
+                                .iter()
+                                .map(|e| format!("{e:?}"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                    } else {
+                        String::new()
+                    };
+
+                    // Use adapter translation for the target pane
+                    let bytes = if let Some(tgt_pane) = app.panes.get(&tgt) {
+                        let adapter = app.adapter_registry.get(&tgt_pane.harness_type);
+                        adapter
+                            .map(|a| {
+                                a.translate_input(&hom_core::OrchestratorCommand::Prompt(
+                                    output.clone(),
+                                ))
+                            })
+                            .unwrap_or_else(|| format!("{output}\n").into_bytes())
+                    } else {
+                        format!("{output}\n").into_bytes()
+                    };
+                    let _ = app.pty_manager.write_to(tgt, &bytes);
+                    info!(source = src, target = tgt, "piped output between panes");
+                }
+                _ => {
+                    app.command_bar.last_error =
+                        Some("source or target pane not found".to_string());
+                }
+            }
+        }
+        Command::Broadcast(msg) => {
+            for pane_id in &app.pane_order {
+                // Use adapter translation per-pane so each harness gets correctly formatted input
+                let bytes = if let Some(pane) = app.panes.get(pane_id) {
+                    let adapter = app.adapter_registry.get(&pane.harness_type);
+                    adapter
+                        .map(|a| {
+                            a.translate_input(&hom_core::OrchestratorCommand::Prompt(msg.clone()))
+                        })
+                        .unwrap_or_else(|| format!("{msg}\n").into_bytes())
+                } else {
+                    format!("{msg}\n").into_bytes()
+                };
+                let _ = app.pty_manager.write_to(*pane_id, &bytes);
+            }
+            info!(
+                pane_count = app.pane_order.len(),
+                "broadcast sent to all panes"
+            );
+        }
+        Command::Run {
+            workflow,
+            variables,
+        } => {
+            // Load workflow from config workflow dir
+            let workflow_dir = app.config.workflow_dir();
+            let workflow_path = workflow_dir.join(format!("{workflow}.yaml"));
+            if workflow_path.exists() {
+                match hom_workflow::parser::WorkflowDef::from_file(&workflow_path) {
+                    Ok(def) => {
+                        app.workflow_status =
+                            Some(format!("running: {} ({} steps)", workflow, def.steps.len()));
+                        info!(
+                            workflow = %workflow,
+                            steps = def.steps.len(),
+                            vars = ?variables,
+                            "workflow loaded, launching executor"
+                        );
+                        // Spawn the workflow executor in a background task
+                        if let Some(bridge) = WORKFLOW_BRIDGE.get() {
+                            let bridge_clone = bridge.clone();
+                            let db = app.db.clone();
+                            let wf_name = workflow.clone();
+                            tokio::spawn(async move {
+                                run_workflow_task(def, bridge_clone, variables, db, &wf_name).await;
+                            });
+                        } else {
+                            app.command_bar.last_error =
+                                Some("workflow bridge not initialized".to_string());
+                        }
+                    }
+                    Err(e) => {
+                        app.command_bar.last_error = Some(format!("workflow parse error: {e}"));
+                    }
+                }
+            } else {
+                app.command_bar.last_error =
+                    Some(format!("workflow not found: {}", workflow_path.display()));
+            }
+        }
+        Command::Save(name) => {
+            // TODO: wire to hom-db session CRUD (save_session)
+            app.command_bar.last_error =
+                Some(format!("session save '{name}' not yet wired to database"));
+            info!(session = %name, "session save requested");
+        }
+        Command::Restore(name) => {
+            // TODO: wire to hom-db session CRUD (load_session)
+            app.command_bar.last_error = Some(format!(
+                "session restore '{name}' not yet wired to database"
+            ));
+            info!(session = %name, "session restore requested");
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_selector(selector: &hom_tui::command_bar::PaneSelector, app: &App) -> Option<u32> {
+    match selector {
+        hom_tui::command_bar::PaneSelector::Id(id) => {
+            if app.panes.contains_key(id) {
+                Some(*id)
+            } else {
+                None
+            }
+        }
+        hom_tui::command_bar::PaneSelector::Name(name) => app
+            .panes
+            .iter()
+            .find(|(_, p)| p.title.to_lowercase().contains(&name.to_lowercase()))
+            .map(|(id, _)| *id),
+    }
+}
+
+/// Handle a workflow bridge request from the executor task.
+fn handle_workflow_request(
+    app: &mut App,
+    req: WorkflowRequest,
+    terminal_size: ratatui::layout::Rect,
+) {
+    match req {
+        WorkflowRequest::SpawnPane {
+            harness,
+            model,
+            reply,
+        } => {
+            let harness_type = HarnessType::from_str_loose(&harness);
+            let result = match harness_type {
+                Some(ht) => {
+                    let cols = terminal_size.width.saturating_sub(2);
+                    let rows = terminal_size.height.saturating_sub(6);
+                    app.spawn_pane(ht, model, cols, rows)
+                }
+                None => Err(hom_core::HomError::Other(format!(
+                    "unknown harness: {harness}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        WorkflowRequest::SendAndWait {
+            pane_id,
+            prompt,
+            timeout,
+            reply,
+        } => {
+            // Write the prompt to the pane's PTY, then register for
+            // completion polling. The main event loop calls
+            // poll_pending_completions() each tick, which uses
+            // detect_completion() to determine when the harness is done
+            // and reads the screen text as output.
+            let write_result = if let Some(pane) = app.panes.get(&pane_id) {
+                // Prefer sideband channel when available (e.g. OpenCode HTTP API)
+                if let Some(ref sideband) = pane.sideband {
+                    // Sideband channels handle prompt delivery and response
+                    // in a single call — no need for completion polling.
+                    let sideband: &dyn hom_core::SidebandChannel = sideband.as_ref();
+                    // We can't call async from here, so spawn a task for sideband
+                    let prompt_clone = prompt.clone();
+                    // SAFETY: sideband is Send+Sync (trait bound on SidebandChannel)
+                    // We need to clone the Box<dyn> to move into the task.
+                    // Instead, send via PTY and let completion polling handle it.
+                    // TODO: full sideband integration requires an async bridge
+                    let _ = sideband;
+                    let adapter = app.adapter_registry.get(&pane.harness_type);
+                    let bytes = adapter
+                        .map(|a| {
+                            a.translate_input(&hom_core::OrchestratorCommand::Prompt(prompt_clone))
+                        })
+                        .unwrap_or_else(|| format!("{prompt}\n").into_bytes());
+                    app.pty_manager.write_to(pane_id, &bytes)
+                } else {
+                    let adapter = app.adapter_registry.get(&pane.harness_type);
+                    let bytes = adapter
+                        .map(|a| a.translate_input(&hom_core::OrchestratorCommand::Prompt(prompt)))
+                        .unwrap_or_else(|| b"prompt\n".to_vec());
+                    app.pty_manager.write_to(pane_id, &bytes)
+                }
+            } else {
+                Err(hom_core::HomError::PaneNotFound(pane_id))
+            };
+
+            match write_result {
+                Ok(()) => {
+                    // Register for completion polling — the main event loop
+                    // calls app.poll_pending_completions() each tick.
+                    app.pending_completions
+                        .push(hom_tui::app::PendingCompletion {
+                            pane_id,
+                            reply,
+                            started: std::time::Instant::now(),
+                            timeout,
+                        });
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            }
+        }
+        WorkflowRequest::KillPane { pane_id, reply } => {
+            let result = app.kill_pane(pane_id);
+            let _ = reply.send(result);
+        }
+    }
+}
+
+/// Run a workflow in a background task.
+async fn run_workflow_task(
+    def: hom_workflow::WorkflowDef,
+    bridge: Arc<WorkflowBridge>,
+    variables: HashMap<String, String>,
+    db: Option<Arc<hom_db::HomDb>>,
+    workflow_name: &str,
+) {
+    let executor = hom_workflow::WorkflowExecutor::new();
+
+    // Build checkpoint store if DB is available
+    let checkpoint_store = db
+        .as_ref()
+        .map(|db| hom_tui::db_checkpoint::DbCheckpointStore::new(db.clone()));
+
+    // Generate a single workflow ID used by both the DB row and the executor,
+    // so that update_workflow_status targets the correct row.
+    let wf_id = uuid::Uuid::new_v4().to_string();
+
+    // Persist workflow start to DB
+    if let Some(ref db) = db {
+        let vars_json = serde_json::to_string(&variables).unwrap_or_default();
+        if let Err(e) = hom_db::workflow::save_workflow(
+            db.pool(),
+            &wf_id,
+            &def.name,
+            workflow_name,
+            "running",
+            &vars_json,
+        )
+        .await
+        {
+            warn!(error = %e, "failed to persist workflow start");
+        }
+    }
+
+    let result = match &checkpoint_store {
+        Some(store) => {
+            executor
+                .execute_with_id(&def, bridge, variables, Some(store), wf_id)
+                .await
+        }
+        None => executor.execute(&def, bridge, variables).await,
+    };
+
+    match result {
+        Ok(wf_result) => {
+            info!(
+                workflow = %wf_result.name,
+                status = ?wf_result.status,
+                duration_ms = wf_result.duration.as_millis() as u64,
+                "workflow completed"
+            );
+            // Update DB
+            if let Some(ref db) = db {
+                let status_str = format!("{:?}", wf_result.status);
+                let _ = hom_db::workflow::update_workflow_status(
+                    db.pool(),
+                    &wf_result.workflow_id,
+                    &status_str,
+                    None,
+                )
+                .await;
+            }
+        }
+        Err(e) => {
+            error!(workflow = %workflow_name, error = %e, "workflow execution failed");
+        }
+    }
+}
