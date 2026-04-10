@@ -354,8 +354,14 @@ hom/
 - NF3 memory per pane: 20.2MB at default 5k scrollback (target <30MB) ✅ — default_scrollback lowered from 10k to 5k
 - NF4 startup: 9.3µs config+terminal init (target <500ms) ✅
 
-**Remaining work — stub only:**
-- GhosttyBackend wiring when libghostty-vt is published
+**Resolved (April 10, 2026 — GhosttyBackend):**
+- GhosttyBackend fully implemented — `libghostty-vt 0.1.1` wired, `Terminal::new/vt_write/resize/grid_ref/cursor_x/y/title` mapped to `TerminalBackend` trait
+- `unsafe impl Send + Sync` with documented safety invariant (single-threaded event loop access)
+- `map_style_color()` maps Ghostty palette/RGB/None to `TermColor`; underline/bold/italic/dim/blink/inverse/strikethrough all mapped
+- 7 tests added (dimensions, plain text, resize, cursor, title, ANSI color, color mapping)
+- `libghostty-vt-sys` build requires Zig network access at first build (`deps.files.ghostty.org`); not validatable in offline environments
+
+**No remaining stubs** — all features are implemented. GhosttyBackend runtime validation requires network access during Zig build.
 
 ## Superpowers Integration
 

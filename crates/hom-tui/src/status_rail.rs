@@ -81,7 +81,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, 80, 1);
-                render_status_rail(frame, area, 2, Some(1), None, 3.14);
+                render_status_rail(frame, area, 2, Some(1), None, std::f64::consts::PI);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();

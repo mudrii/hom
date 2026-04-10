@@ -27,8 +27,8 @@ hom-workflow = { path = "crates/hom-workflow" }
 hom-tui = { path = "crates/hom-tui" }
 hom-db = { path = "crates/hom-db" }
 
-# Terminal emulation — pin to specific commit for stability
-# libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "PIN_ME" }
+# Terminal emulation
+libghostty-vt = "0.1.1"
 vt100 = "0.16"  # Fallback terminal emulator
 
 # PTY management
