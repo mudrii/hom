@@ -62,9 +62,9 @@ A full working product that can:
 |------------|--------|
 | Language | Rust (performance, safety, stability) — 2024 edition, MSRV 1.85 |
 | Terminal emulation (current default) | `vt100` crate — working default backend, pure Rust, no external build deps |
-| Terminal emulation (target primary) | `libghostty-rs` — target primary backend, best-in-class VT emulation, Kitty protocol support. Currently stubbed; requires Zig ≥0.15.x |
+| Terminal emulation (target primary) | `libghostty-rs` — target primary backend, best-in-class VT emulation, Kitty protocol support. Fully implemented with `libghostty-vt 0.1.1`; opt-in via `--features ghostty-backend` |
 | Build dependency | None for default build (`vt100-backend`). Zig ≥0.15.x required when `ghostty-backend` feature is enabled |
-| API stability risk | libghostty-rs is v0.1.1, pre-1.0 — pin commits, plan for API churn. Abstracted behind `TerminalBackend` trait with vt100 as working fallback |
+| API stability risk | libghostty-rs is v0.1.1, pre-1.0 — plan for API churn. Abstracted behind `TerminalBackend` trait with vt100 as working fallback |
 
 ---
 
@@ -176,7 +176,7 @@ YAML file → WorkflowDef::from_file() → WorkflowDag::from_steps()
 
 ### 4.1 Terminal Emulation Layer
 
-Each pane embeds a full terminal emulator instance behind the `TerminalBackend` trait. The current working default is the `vt100` crate (`Vt100Backend`), which provides solid VT100/VT220 emulation with zero external build dependencies. The target primary backend is `libghostty-rs` (`GhosttyBackend`), which will provide best-in-class VT emulation with Kitty keyboard and graphics protocol support once wired (currently stubbed — all methods return placeholder values).
+Each pane embeds a full terminal emulator instance behind the `TerminalBackend` trait. The current working default is the `vt100` crate (`Vt100Backend`), which provides solid VT100/VT220 emulation with zero external build dependencies. The target primary backend is `libghostty-rs` (`GhosttyBackend`), which provides best-in-class VT emulation with Kitty keyboard and graphics protocol support — fully implemented with `libghostty-vt 0.1.1`, opt-in via `--features ghostty-backend`.
 
 #### Architecture
 
@@ -234,11 +234,11 @@ Each pane embeds a full terminal emulator instance behind the `TerminalBackend` 
 - Status: **Fully implemented and working**
 
 **Target primary — `GhosttyBackend`:**
-- Feature flag: `ghostty-backend` (opt-in, dependency currently commented out in Cargo.toml)
-- Dependency: `libghostty-vt` via git (requires Zig ≥0.15.x at build time)
+- Feature flag: `ghostty-backend` (opt-in)
+- Dependency: `libghostty-vt = "0.1.1"` (requires Zig ≥0.15.x at build time; Zig compiles Ghostty's C VT library)
 - Capabilities: Full Kitty keyboard + graphics protocol, alternate screen, scrollback, GPU rendering
-- Status: **Stubbed** — all trait methods return placeholder values (not `todo!()` panics). Requires uncommenting the dependency and Zig ≥0.15.x to implement
-- Pin exact commit hash to manage API churn (pre-1.0 library)
+- Status: **Fully implemented** — all `TerminalBackend` trait methods wired; 7 unit tests pass; `unsafe impl Send + Sync` with documented single-threaded safety invariant
+- API churn note: pre-1.0 library — abstracted behind `TerminalBackend` trait so vt100 works as fallback
 
 **Build system:**
 ```toml
@@ -246,7 +246,7 @@ Each pane embeds a full terminal emulator instance behind the `TerminalBackend` 
 [features]
 default = ["vt100-backend"]
 vt100-backend = ["dep:vt100"]
-# ghostty-backend = ["dep:libghostty-vt"]  # uncomment when Zig ≥0.15.x available
+ghostty-backend = ["dep:libghostty-vt"]  # opt-in; requires Zig ≥0.15.x
 ```
 
 #### The `TerminalBackend` Trait
@@ -277,7 +277,7 @@ pub trait TerminalBackend: Send + Sync {
 
 #### Color Mapping
 
-The `color_map` module converts terminal emulator colors to ratatui `Color` values. Both backends produce `ScreenSnapshot` cells with color and attribute information that the renderer maps cell-by-cell into ratatui buffers. The vt100 backend (current default) is fully mapped; the ghostty backend mapping is prepared but awaits the implementation.
+The `color_map` module converts terminal emulator colors to ratatui `Color` values. Both backends produce `ScreenSnapshot` cells with color and attribute information that the renderer maps cell-by-cell into ratatui buffers. Both backends are fully mapped: vt100 via `map_vt100_color()`, ghostty via `map_style_color()` (palette 0-255, RGB, and default).
 
 ### 4.2 Pane Management and App State
 
@@ -802,7 +802,7 @@ hom/
 │   │   ├── Cargo.toml            # depends on vt100 (default); ghostty-backend feature flag
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── ghostty.rs        # GhosttyBackend — stubbed, target primary (needs Zig)
+│   │       ├── ghostty.rs        # GhosttyBackend — fully implemented, opt-in (needs Zig ≥0.15.x)
 │   │       ├── fallback_vt100.rs # Vt100Backend — current working default
 │   │       └── color_map.rs      # Terminal color → ratatui color mapping
 │   │
@@ -893,8 +893,8 @@ src/main.rs      → all crates
 # Workspace Cargo.toml [workspace.dependencies]
 
 # Terminal emulation
-# libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "PIN_ME" }  # Target primary, uncomment when Zig available
-vt100 = "0.16"                    # Current working default backend
+libghostty-vt = "0.1.1"           # GhosttyBackend — opt-in via ghostty-backend feature, requires Zig ≥0.15.x
+vt100 = "0.16"                    # Vt100Backend — current default, pure Rust, no external build deps
 
 # PTY management
 portable-pty = "0.9"
@@ -941,11 +941,13 @@ async-trait = "0.1"
 
 | Area | Item | Status |
 |------|------|--------|
-| Terminal | GhosttyBackend implementation | **Stubbed** — trait methods return placeholders. Detailed wiring steps documented in ghostty.rs. Blocked on libghostty-vt publication + Zig ≥0.15.x |
+| Terminal | GhosttyBackend implementation | **RESOLVED** — `libghostty-vt 0.1.1` fully wired; all trait methods implemented; 7 unit tests pass; `unsafe Send + Sync` with documented invariant |
 | Workflow | Parallel execution | **RESOLVED** — `Arc<dyn WorkflowRuntime>` + `JoinSet` for concurrent batch execution |
 | Workflow | SendAndWait completion | **RESOLVED** — `PendingCompletion` polling via `detect_completion()` |
 | Workflow | Sideband async bridge | **RESOLVED** — SendAndWait uses `sideband.send_prompt()` for sideband-capable panes |
 | Adapters | `parse_screen()` | **RESOLVED** — all 7 adapters have real implementations (JSONL, screen text patterns) |
+| Adapters | RPC get_events() | **RESOLVED** — non-blocking `try_lock` + 1ms timeout; parses JSON-RPC notifications |
+| Adapters | `detect_completion()` | **RESOLVED** — `last_non_empty_line()` + anchored `starts_with()` patterns per adapter; error detection added |
 | Adapters | RPC sideband | **RESOLVED** — full JSON-RPC subprocess implementation with stdin/stdout communication |
 | Adapters | HTTP sideband | **RESOLVED** — SSE event polling via GET /global/event, integration tests added |
 | Adapters | Copilot ACP | **RESOLVED** — `--acp --stdio` mode support, sideband via JSON-RPC |
@@ -953,6 +955,12 @@ async-trait = "0.1"
 | DB | Cost tracking | **RESOLVED** — `log_cost()` called from workflow steps and token usage events |
 | Config | Env var expansion | **RESOLVED** — `${VAR}` interpolated in TOML values after loading |
 | Config | Keybinding config | **RESOLVED** — `KeybindingsConfig` applied to `InputRouter::from_config()` |
+| TUI | Graceful PTY shutdown | **RESOLVED** — `App::shutdown()` + `PtyManager::kill_all()` called on Ctrl-Q/`:quit` |
+| TUI | Process crash handling | **RESOLVED** — exited panes show `[EXITED: N]` in red; pending workflow steps notified |
+| TUI | Sideband health polling | **RESOLVED** — `health_check()` called every ~5s in main loop; notifies on failure |
+| TUI | AsyncPtyReader cancellation | **RESOLVED** — `abort()` method added; called in `kill_pane()` before pane removal |
+| TUI | Keybinding validation | **RESOLVED** — `validate_keybindings()` at startup; warns on invalid config strings |
+| Tests | E2E PTY pipeline | **RESOLVED** — spawn→read (echo), spawn→write→read (cat), PTY→Vt100→ScreenSnapshot |
 | Performance | NFR benchmarks | **VALIDATED** — all 4 measurable NFRs pass: NF1 47µs (<16ms), NF2 12.8µs/1kkeys (<50ms), NF3 20.2MB (<30MB at default 5k scrollback), NF4 9.3µs (<500ms) |
 
 ---
@@ -1032,11 +1040,12 @@ async-trait = "0.1"
 - ~~Keybinding config wiring~~ → KeybindingsConfig applied to InputRouter
 
 **Active future work:**
-1. **GhosttyBackend implementation** — blocked on libghostty-vt + Zig ≥0.15.x
-2. **GPU rendering** — leverage libghostty's pipeline for complex output
-3. **Plugin system for adapters** — WASM or shared library plugins
-4. **Remote pane support** — spawn harnesses on remote machines via SSH
-5. **Web UI** — serve ratatui frames over WebSocket
-6. **MCP integration** — expose HOM as an MCP server
-7. **Workflow marketplace** — share and discover templates
-8. **Agent-to-agent protocol** — standardized message format
+1. **Linux platform validation** — `cargo check` + test suite on Linux; NF6 target not yet validated
+2. **GhosttyBackend as default** — promote `ghostty-backend` to the default feature once declared stable (currently opt-in)
+3. **GPU rendering** — leverage libghostty's pipeline for complex output
+4. **Plugin system for adapters** — WASM or shared library plugins
+5. **Remote pane support** — spawn harnesses on remote machines via SSH
+6. **Web UI** — serve ratatui frames over WebSocket
+7. **MCP integration** — expose HOM as an MCP server
+8. **Workflow marketplace** — share and discover templates
+9. **Agent-to-agent protocol** — standardized message format

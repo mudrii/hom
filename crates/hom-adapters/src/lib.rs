@@ -106,7 +106,11 @@ mod tests {
     #[test]
     fn test_registry_available_returns_seven() {
         let registry = AdapterRegistry::new();
-        assert_eq!(registry.available().len(), 7, "expected 7 registered adapters");
+        assert_eq!(
+            registry.available().len(),
+            7,
+            "expected 7 registered adapters"
+        );
     }
 
     #[test]

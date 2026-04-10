@@ -172,11 +172,8 @@ impl InputRouter {
 
                 // Left-click outside the focused pane → switch focus.
                 if matches!(mouse_evt.kind, MouseEventKind::Down(MouseButton::Left))
-                    && let Some(clicked) = super::layout::pane_at_position(
-                        pane_areas,
-                        mouse_evt.column,
-                        mouse_evt.row,
-                    )
+                    && let Some(clicked) =
+                        super::layout::pane_at_position(pane_areas, mouse_evt.column, mouse_evt.row)
                     && clicked != focused_id
                 {
                     self.mode = InputMode::PaneInput { focused: clicked };
@@ -197,7 +194,11 @@ impl InputRouter {
                     ),
                     None => Vec::new(),
                 };
-                if bytes.is_empty() { Action::None } else { Action::WriteToPty(focused_id, bytes) }
+                if bytes.is_empty() {
+                    Action::None
+                } else {
+                    Action::WriteToPty(focused_id, bytes)
+                }
             }
 
             // ── Mouse click focuses a pane (CommandBar / WorkflowControl modes) ──
@@ -511,8 +512,24 @@ mod tests {
     fn make_two_pane_areas() -> Vec<(PaneId, ratatui::layout::Rect)> {
         use ratatui::layout::Rect;
         vec![
-            (1, Rect { x: 0, y: 0, width: 40, height: 24 }),
-            (2, Rect { x: 40, y: 0, width: 40, height: 24 }),
+            (
+                1,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 40,
+                    height: 24,
+                },
+            ),
+            (
+                2,
+                Rect {
+                    x: 40,
+                    y: 0,
+                    width: 40,
+                    height: 24,
+                },
+            ),
         ]
     }
 
@@ -623,24 +640,14 @@ mod tests {
     #[test]
     fn test_encode_mouse_scroll_up() {
         // ScrollUp at col=4, row=2, no mods → Cb=64+32=96, Cx=4+33=37, Cy=2+33=35
-        let bytes = encode_mouse_event(
-            &MouseEventKind::ScrollUp,
-            4,
-            2,
-            KeyModifiers::empty(),
-        );
+        let bytes = encode_mouse_event(&MouseEventKind::ScrollUp, 4, 2, KeyModifiers::empty());
         assert_eq!(bytes, vec![0x1b, b'[', b'M', 96, 37, 35]);
     }
 
     #[test]
     fn test_encode_mouse_scroll_down() {
         // ScrollDown at col=0, row=0 → Cb=65+32=97
-        let bytes = encode_mouse_event(
-            &MouseEventKind::ScrollDown,
-            0,
-            0,
-            KeyModifiers::empty(),
-        );
+        let bytes = encode_mouse_event(&MouseEventKind::ScrollDown, 0, 0, KeyModifiers::empty());
         assert_eq!(bytes, vec![0x1b, b'[', b'M', 97, 33, 33]);
     }
 
@@ -670,8 +677,7 @@ mod tests {
 
     #[test]
     fn test_encode_mouse_moved_returns_empty() {
-        let bytes =
-            encode_mouse_event(&MouseEventKind::Moved, 5, 5, KeyModifiers::empty());
+        let bytes = encode_mouse_event(&MouseEventKind::Moved, 5, 5, KeyModifiers::empty());
         assert!(bytes.is_empty(), "Moved events must not be forwarded");
     }
 

@@ -19,3 +19,4 @@ vt100 = { workspace = true, optional = true }
 
 [dev-dependencies]
 hom-pty.workspace = true
+tokio.workspace = true

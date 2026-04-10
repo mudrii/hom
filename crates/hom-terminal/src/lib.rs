@@ -7,8 +7,8 @@
 //!
 //! - `vt100-backend` (default): Use the `vt100` crate. No external build deps.
 //! - `ghostty-backend`: Use `libghostty-rs`. Requires Zig ≥0.15.x at build time.
-//!   Currently stubbed — the feature flag exists but the crate dependency is
-//!   commented out in `Cargo.toml` until libghostty-vt is available.
+//!   Fully implemented with `libghostty-vt 0.1.1`. Requires Zig ≥0.15.x at
+//!   build time (the Zig toolchain compiles Ghostty's C VT library).
 
 pub mod color_map;
 

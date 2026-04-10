@@ -255,19 +255,28 @@ mod tests {
     #[test]
     fn test_translate_cancel() {
         let adapter = ClaudeCodeAdapter::new();
-        assert_eq!(adapter.translate_input(&OrchestratorCommand::Cancel), vec![0x03]);
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Cancel),
+            vec![0x03]
+        );
     }
 
     #[test]
     fn test_translate_accept() {
         let adapter = ClaudeCodeAdapter::new();
-        assert_eq!(adapter.translate_input(&OrchestratorCommand::Accept), b"y\n");
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Accept),
+            b"y\n"
+        );
     }
 
     #[test]
     fn test_translate_reject() {
         let adapter = ClaudeCodeAdapter::new();
-        assert_eq!(adapter.translate_input(&OrchestratorCommand::Reject), b"n\n");
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Reject),
+            b"n\n"
+        );
     }
 
     #[test]

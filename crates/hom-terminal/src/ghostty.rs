@@ -8,10 +8,10 @@
 
 #[cfg(feature = "ghostty-backend")]
 use libghostty_vt::{
+    Terminal,
     ffi::GhosttyPointCoordinate,
     style::{StyleColor, Underline},
     terminal::{Options as TerminalOptions, Point},
-    Terminal,
 };
 
 #[cfg(feature = "ghostty-backend")]
@@ -53,7 +53,11 @@ impl TerminalBackend for GhosttyBackend {
             max_scrollback: scrollback,
         })
         .expect("libghostty-vt terminal init failed");
-        Self { terminal, cols, rows }
+        Self {
+            terminal,
+            cols,
+            rows,
+        }
     }
 
     fn process(&mut self, bytes: &[u8]) {
@@ -105,11 +109,18 @@ impl TerminalBackend for GhosttyBackend {
                                     blink: style.blink,
                                 },
                             ),
-                            Err(_) => {
-                                (TermColor::Default, TermColor::Default, CellAttributes::default())
-                            }
+                            Err(_) => (
+                                TermColor::Default,
+                                TermColor::Default,
+                                CellAttributes::default(),
+                            ),
                         };
-                        Cell { character, fg, bg, attrs }
+                        Cell {
+                            character,
+                            fg,
+                            bg,
+                            attrs,
+                        }
                     }
                     Err(_) => Cell::default(),
                 };
@@ -175,7 +186,6 @@ fn map_style_color(color: StyleColor) -> TermColor {
 #[cfg(all(test, feature = "ghostty-backend"))]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_new_creates_correct_dimensions() {
@@ -254,7 +264,11 @@ mod tests {
     fn test_map_style_color_rgb() {
         use libghostty_vt::style::RgbColor;
         assert_eq!(
-            map_style_color(StyleColor::Rgb(RgbColor { r: 255, g: 128, b: 0 })),
+            map_style_color(StyleColor::Rgb(RgbColor {
+                r: 255,
+                g: 128,
+                b: 0
+            })),
             TermColor::Rgb(255, 128, 0)
         );
     }

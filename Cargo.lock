@@ -1193,6 +1193,7 @@ dependencies = [
  "hom-pty",
  "libghostty-vt",
  "ratatui",
+ "tokio",
  "vt100",
 ]
 
