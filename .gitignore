@@ -2,3 +2,6 @@
 *.swp
 *.swo
 .DS_Store
+
+# Homebrew formula is rendered by scripts/update-homebrew.sh — commit only the template
+Formula/hom.rb
