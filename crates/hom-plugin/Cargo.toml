@@ -1,0 +1,12 @@
+[package]
+name = "hom-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Plugin loader and C ABI vtable for HOM harness adapter plugins"
+
+[dependencies]
+hom-core.workspace = true
+libloading.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
