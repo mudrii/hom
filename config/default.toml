@@ -3,7 +3,7 @@
 
 [general]
 default_layout = "hsplit"
-max_scrollback = 10000
+max_scrollback = 5000
 render_fps = 30
 max_panes = 8
 

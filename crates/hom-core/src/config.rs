@@ -50,7 +50,7 @@ fn default_layout() -> LayoutKind {
     LayoutKind::HSplit
 }
 fn default_scrollback() -> usize {
-    10_000
+    5_000
 }
 fn default_fps() -> u32 {
     30
