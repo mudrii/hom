@@ -58,10 +58,18 @@ impl PluginLoader {
             )));
         }
 
+        // SAFETY: hom_plugin_destroy is an optional C function with signature
+        // `fn(*mut HomPluginVtable)`. If absent, the plugin has no cleanup to do.
+        let destroy_fn: Option<extern "C" fn(*mut HomPluginVtable)> = unsafe {
+            lib.get(b"hom_plugin_destroy\0")
+                .ok()
+                .map(|s: libloading::Symbol<extern "C" fn(*mut HomPluginVtable)>| *s)
+        };
+
         info!(path = %path.display(), "loaded plugin");
         // SAFETY: vtable_ptr is non-null and points to a valid HomPluginVtable (checked above).
         // lib keeps the library loaded for the duration of PluginAdapter's lifetime.
-        Ok(unsafe { PluginAdapter::new(lib, vtable_ptr) })
+        Ok(unsafe { PluginAdapter::new(lib, vtable_ptr, destroy_fn) })
     }
 
     /// Scan a directory for `.dylib` (macOS) and `.so` (Linux) plugin files.

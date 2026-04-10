@@ -19,15 +19,23 @@ use crate::ffi::{HomInputKind, HomPluginVtable};
 /// The `display_name` and `plugin_name` strings are cached at construction
 /// time so that `HarnessAdapter::display_name()` can return a `&str` with
 /// lifetime tied to `self`.
+///
+/// # Field declaration order
+///
+/// Fields drop in declaration order. `_lib` is declared last so the dynamic
+/// library remains loaded when `Drop` calls `destroy_fn(vtable)`.
 #[derive(Debug)]
 pub struct PluginAdapter {
-    /// Keeps the `.dylib`/`.so` loaded for the adapter's lifetime.
-    _lib: Library,
-    vtable: *mut HomPluginVtable,
     /// Cached from `vtable.display_name()` at construction.
     display_name: String,
     /// Cached from `vtable.binary_name()` at construction; used as registry key.
     binary_name: String,
+    /// Optional cleanup function called in `Drop` before the library unloads.
+    destroy_fn: Option<extern "C" fn(*mut HomPluginVtable)>,
+    vtable: *mut HomPluginVtable,
+    /// Keeps the `.dylib`/`.so` loaded for the adapter's lifetime.
+    /// Declared last so it drops after `destroy_fn` has been called.
+    _lib: Library,
 }
 
 // SAFETY: `PluginAdapter` is only accessed from the single-threaded TUI event loop.
@@ -36,15 +44,31 @@ pub struct PluginAdapter {
 unsafe impl Send for PluginAdapter {}
 unsafe impl Sync for PluginAdapter {}
 
+impl Drop for PluginAdapter {
+    fn drop(&mut self) {
+        if let Some(destroy) = self.destroy_fn {
+            // vtable is still valid because _lib has not been dropped yet —
+            // struct fields drop in declaration order, and _lib is declared after
+            // destroy_fn and vtable, so the library is still loaded here.
+            destroy(self.vtable);
+        }
+    }
+}
+
 impl PluginAdapter {
-    /// Create from a loaded library and vtable pointer.
+    /// Create from a loaded library, vtable pointer, and optional destroy function.
     ///
     /// Eagerly caches `display_name` and `binary_name` from the vtable.
     ///
     /// # Safety
     ///
     /// `vtable` must be a valid non-null pointer returned by `hom_plugin_init` in `lib`.
-    pub unsafe fn new(lib: Library, vtable: *mut HomPluginVtable) -> Self {
+    /// `destroy_fn`, if provided, must be the plugin's `hom_plugin_destroy` symbol.
+    pub unsafe fn new(
+        lib: Library,
+        vtable: *mut HomPluginVtable,
+        destroy_fn: Option<extern "C" fn(*mut HomPluginVtable)>,
+    ) -> Self {
         // SAFETY: vtable is non-null and was validated by PluginLoader::load.
         // display_name and binary_name return static C strings — no free needed.
         let (dn_ptr, bn_ptr) = unsafe { (((*vtable).display_name)(), ((*vtable).binary_name)()) };
@@ -68,16 +92,17 @@ impl PluginAdapter {
         };
 
         Self {
-            _lib: lib,
-            vtable,
             display_name,
             binary_name,
+            destroy_fn,
+            vtable,
+            _lib: lib,
         }
     }
 
     /// Return the plugin's binary name (used as registry key).
-    pub fn plugin_name(&self) -> &str {
-        &self.binary_name
+    pub fn plugin_name(&self) -> String {
+        self.binary_name.clone()
     }
 
     /// Call a plugin function that takes a JSON C string and returns a heap JSON C string.
@@ -144,6 +169,9 @@ impl hom_core::HarnessAdapter for PluginAdapter {
     fn harness_type(&self) -> HarnessType {
         // Plugins don't map to a built-in HarnessType.
         // They are keyed by plugin_name() in AdapterRegistry::plugins.
+        // Callers that need the real identity use plugin_name() or the pane title.
+        // This value is intentionally unused for plugin dispatch — plugins are keyed
+        // by name in AdapterRegistry::plugins, never by HarnessType.
         HarnessType::ClaudeCode
     }
 
@@ -184,8 +212,8 @@ impl hom_core::HarnessAdapter for PluginAdapter {
 
         let program = value["program"]
             .as_str()
-            .unwrap_or(self.plugin_name())
-            .to_string();
+            .map(String::from)
+            .unwrap_or_else(|| self.plugin_name());
         let args = value["args"]
             .as_array()
             .map(|a| {
@@ -204,30 +232,42 @@ impl hom_core::HarnessAdapter for PluginAdapter {
     }
 
     fn translate_input(&self, command: &OrchestratorCommand) -> Vec<u8> {
+        // `owned_hex` is declared here so it lives long enough for `owned_hex.as_str()`
+        // inside the match arm. It is only initialized in the `Raw` branch.
+        let owned_hex;
         let (kind, text) = match command {
             OrchestratorCommand::Prompt(s) => (HomInputKind::Prompt, s.as_str()),
             OrchestratorCommand::Cancel => (HomInputKind::Cancel, ""),
             OrchestratorCommand::Accept => (HomInputKind::Accept, ""),
             OrchestratorCommand::Reject => (HomInputKind::Reject, ""),
-            OrchestratorCommand::Raw(_) => (HomInputKind::Raw, ""),
+            OrchestratorCommand::Raw(bytes) => {
+                // Hex-encode raw bytes so they survive the null-terminated C string boundary.
+                owned_hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                (HomInputKind::Raw, owned_hex.as_str())
+            }
         };
 
         let text_c = match CString::new(text) {
             Ok(s) => s,
-            Err(_) => return Vec::new(),
+            Err(_) => {
+                warn!(plugin = %self.plugin_name(), "translate_input: text contains null byte");
+                return Vec::new();
+            }
         };
 
-        // SAFETY: translate_input vtable fn is valid; text_c is a valid null-terminated C string.
+        // SAFETY: translate_input is a valid function pointer from the vtable.
+        // text_c is a valid null-terminated C string. out_ptr is heap-allocated by the plugin
+        // and must be freed with free_str.
         let out_ptr = unsafe { ((*self.vtable).translate_input)(kind, text_c.as_ptr()) };
         if out_ptr.is_null() {
             return Vec::new();
         }
 
-        // SAFETY: out_ptr is a valid null-terminated C string allocated by the plugin.
+        // SAFETY: out_ptr is a valid null-terminated C string returned by the plugin.
         let hex = unsafe { CStr::from_ptr(out_ptr) }
             .to_string_lossy()
             .into_owned();
-        // SAFETY: free_str frees heap strings from plugin functions.
+        // SAFETY: free_str must be called on heap strings returned by plugin functions.
         unsafe { ((*self.vtable).free_str)(out_ptr) };
 
         decode_hex_bytes(&hex)
