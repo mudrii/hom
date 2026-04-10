@@ -33,11 +33,10 @@ function renderPane(container, pane) {
   let canvas = container.querySelector('canvas');
   const needW = pane.cols * CELL_W, needH = pane.rows * CELL_H;
   if (!canvas || canvas.width !== needW || canvas.height !== needH) {
+    if (canvas) container.removeChild(canvas);
     canvas = document.createElement('canvas');
     canvas.width = needW;
     canvas.height = needH;
-    const old = container.querySelector('canvas');
-    if (old) container.removeChild(old);
     container.appendChild(canvas);
   }
   const ctx = canvas.getContext('2d');

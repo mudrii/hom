@@ -56,7 +56,10 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
         tokio::select! {
             frame = rx.recv() => match frame {
                 Ok(f) => {
-                    let json = serde_json::to_string(&f).unwrap_or_default();
+                    let json = match serde_json::to_string(&f) {
+                        Ok(j) => j,
+                        Err(e) => { warn!("WS frame serialize failed: {e}"); continue; }
+                    };
                     if socket.send(Message::Text(json.into())).await.is_err() {
                         debug!("WS client disconnected");
                         break;
@@ -68,7 +71,11 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<WebInput>(&text) {
-                        Ok(input) => { let _ = state.input_tx.try_send(input); }
+                        Ok(input) => {
+                            if let Err(e) = state.input_tx.try_send(input) {
+                                warn!("WS input channel full, dropping keystroke: {e}");
+                            }
+                        }
                         Err(e) => warn!("WS bad input: {e}"),
                     }
                 }
