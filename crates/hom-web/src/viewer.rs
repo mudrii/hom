@@ -112,7 +112,7 @@ document.addEventListener('keydown', (e) => {
   const pane_id = focused.dataset.paneId;
   if (!pane_id) return;
   e.preventDefault();
-  const text = e.key === 'Enter' ? '\n' : e.key.length === 1 ? e.key : '';
+  const text = e.key === 'Enter' ? '\r' : e.key.length === 1 ? e.key : '';
   if (text) ws.send(JSON.stringify({ pane_id, text }));
 });
 
@@ -140,7 +140,10 @@ mod tests {
     fn viewer_uses_filltextnotinnerhtml_for_cells() {
         assert!(VIEWER_HTML.contains("fillText"));
         let innerhtml_count = VIEWER_HTML.matches("innerHTML").count();
-        assert_eq!(innerhtml_count, 0, "found innerHTML — use fillText or textContent instead");
+        assert_eq!(
+            innerhtml_count, 0,
+            "found innerHTML — use fillText or textContent instead"
+        );
     }
 
     #[test]
