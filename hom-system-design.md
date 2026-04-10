@@ -1,6 +1,6 @@
 # HOM: Harness Orchestration Management TUI — System Design Document
 
-**Version:** 3.3 | **Date:** April 11, 2026 | **Status:** Architecture & Implementation Status
+**Version:** 3.4 | **Date:** April 11, 2026 | **Status:** Architecture & Implementation Status
 
 ---
 
@@ -70,7 +70,7 @@ A full working product that can:
 
 ## 3. High-Level Architecture
 
-All 7 crates compile clean. Core types, traits, adapters, workflow engine, TUI, and storage layer are implemented.
+All 10 crates compile clean. Core types, traits, adapters, workflow engine, TUI, storage, MCP server, web UI, remote PTY, and plugin system are implemented.
 
 ```
                             ┌─────────────────────────────────────────────────┐
@@ -292,7 +292,7 @@ The `App` struct in `hom-tui` owns all runtime state: panes, PTY manager, adapte
 2. Look up `HarnessEntry` from `HomConfig.harnesses` for binary override, default model, and env vars
 3. Build the command via the adapter's `build_command()` with effective model and extra args
 4. Spawn the PTY process via `PtyManager::spawn()` with working directory support
-5. Create a `TerminalBackend` instance (`Vt100Backend` by default, `GhosttyBackend` when enabled) at the pane's dimensions
+5. Create a `TerminalBackend` instance (`GhosttyBackend` by default, `Vt100Backend` when using `--no-default-features --features vt100-backend`) at the pane's dimensions
 6. Start an `AsyncPtyReader` tokio task to bridge PTY output into a channel
 7. Register the pane in `App.panes` and `App.pane_order`
 
@@ -568,22 +568,31 @@ Parses and executes orchestrator-level commands:
 
 | Command | Syntax | Status |
 |---------|--------|--------|
-| `:spawn` | `:spawn claude opus --dir /path -- extra args` | Implemented — reads config, supports model/dir/args |
+| `:spawn` | `:spawn claude [--model opus] [--dir /path] [--remote user@host[:port]] [-- extra args]` | Implemented — reads config, supports model/dir/remote/args; falls through to plugin registry for unknown names |
+| `:load-plugin` | `:load-plugin /path/to/plugin.dylib` | Implemented — loads a C ABI plugin and registers it in AdapterRegistry |
 | `:kill` | `:kill 1` or `:kill claude` | Implemented |
 | `:focus` | `:focus 1` or `:focus claude` | Implemented |
 | `:send` | `:send 1 "analyze this"` | Implemented — strips quotes, adapter-translated with newline |
-| `:pipe` | `:pipe 1 -> 2` | Implemented — pipes screen snapshot text (not structured data) from source to target PTY |
+| `:pipe` | `:pipe 1 -> 2` | Implemented — pipes screen snapshot text from source to target PTY |
 | `:broadcast` | `:broadcast "stop"` | Implemented — adapter-translated per-pane |
 | `:run` | `:run code-review --var task="add auth"` | Implemented — parses YAML, validates DAG, spawns WorkflowExecutor via WorkflowBridge |
 | `:layout` | `:layout grid \| hsplit \| vsplit` | Implemented — recomputes areas, resizes all PTYs |
-| `:save` | `:save my-session` | Implemented — serialises pane layout + harness config to SQLite via `hom-db::session::save_session` |
-| `:restore` | `:restore my-session` | Implemented — loads session from SQLite and re-spawns panes via `hom-db::session::load_session` |
+| `:save` | `:save my-session` | Implemented — serialises pane layout + harness config to SQLite |
+| `:restore` | `:restore my-session` | Implemented — loads session from SQLite and re-spawns panes |
 | `:help` | `:help` | Implemented — lists all commands |
 | `:quit` | `:quit` | Implemented |
 
 ```rust
 pub enum Command {
-    Spawn { harness: HarnessType, model: Option<String>, working_dir: Option<PathBuf>, extra_args: Vec<String> },
+    Spawn {
+        harness: Option<HarnessType>,  // None for plugin names
+        harness_name: String,           // raw name from command bar
+        model: Option<String>,
+        working_dir: Option<PathBuf>,
+        extra_args: Vec<String>,
+        remote: Option<RemoteTarget>,  // Some → SSH remote pane
+    },
+    LoadPlugin { path: PathBuf },
     Kill(PaneSelector),
     Focus(PaneSelector),
     Send { target: PaneSelector, input: String },
@@ -598,7 +607,7 @@ pub enum Command {
 }
 
 pub enum PaneSelector {
-    Id(u32),
+    Id(PaneId),
     Name(String),  // case-insensitive substring match on pane title
 }
 ```
@@ -682,23 +691,38 @@ hom-tui (tick loop)
 **Key types (`hom-web`):**
 
 ```rust
-pub struct WebFrame {
-    pub pane_id: u32,
-    pub rows: Vec<Vec<WebCell>>,
-    pub cursor: Option<(u16, u16)>,
-    pub timestamp_ms: u64,
-}
-
+/// A single cell in a pane's screen buffer.
 pub struct WebCell {
     pub ch: char,
-    pub fg: u32,   // ANSI 256-color index or RGB packed
+    pub fg: u32,      // RRGGBB packed; 0xFFFFFF = terminal default
     pub bg: u32,
-    pub attrs: u8, // bold | italic | underline | dim | ...
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
 }
 
+/// One pane's screen state as a flat row-major cell grid.
+pub struct WebPane {
+    pub pane_id: String,
+    pub title: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub cursor_col: u16,
+    pub cursor_row: u16,
+    pub cells: Vec<WebCell>,  // cells[row * cols + col]
+    pub focused: bool,
+}
+
+/// Full frame broadcast to all WebSocket clients after each render tick.
+pub struct WebFrame {
+    pub ts: u64,             // Unix timestamp, milliseconds
+    pub panes: Vec<WebPane>,
+}
+
+/// Keystroke message sent from browser to server.
 pub struct WebInput {
-    pub pane_id: u32,
-    pub key: String,   // e.g. "Enter", "Backspace", printable chars
+    pub pane_id: String,     // target pane
+    pub text: String,        // UTF-8 text; server appends newline
 }
 ```
 
@@ -715,7 +739,7 @@ Remote panes run a harness process on a remote machine over SSH, bridging the re
 
 **Architecture:**
 
-- **`RemoteTarget`** — parsed from `user@host[:port]`; stored in `PaneKind::Remote { target: RemoteTarget }`
+- **`RemoteTarget`** — parsed from `user@host[:port]`; stored in `PaneKind::Remote(RemoteTarget)`
 - **`RemotePtyManager`** in `crates/hom-pty/src/remote.rs` — uses `ssh2 = "0.9"` to establish an SSH session, open a channel with a PTY, and spawn the remote harness command
 - **Auth chain** — tried in order: SSH agent (via `$SSH_AUTH_SOCK`) → `~/.ssh/id_ed25519` → `~/.ssh/id_rsa`
 - **Remote command** — the harness `CommandSpec` is shell-quoted and executed on the remote host; environment variables from the adapter config are forwarded via `channel.setenv()`
@@ -732,13 +756,63 @@ pub struct RemoteTarget {
 
 pub enum PaneKind {
     Local,
-    Remote { target: RemoteTarget },
+    Remote(RemoteTarget),
 }
 ```
 
 **Dependency:** `ssh2 = "0.9"` added to `crates/hom-pty/Cargo.toml`.
 
-### 4.10 Plugin System
+### 4.10 MCP Server
+
+`hom-mcp` is a JSON-RPC 2.0 MCP (Model Context Protocol) server that runs over stdin/stdout and exposes HOM as a tool-provider to any MCP client (Claude Desktop, other AI agents, CI scripts).
+
+**Activation:** Pass `--mcp` to the `hom` binary. The MCP server spawns as a tokio task alongside the TUI event loop. The two communicate via a bounded channel (`McpRequest` / `McpResponse`) defined in `hom-core::types`.
+
+**Six tools exposed:**
+
+| Tool | Description |
+|------|-------------|
+| `spawn_pane` | Spawn a new harness pane; returns `pane_id` |
+| `send_to_pane` | Send text to a pane's stdin |
+| `run_workflow` | Trigger a YAML workflow by path; returns diagnostic |
+| `list_panes` | Return all active pane IDs and harness types |
+| `get_pane_output` | Return the last N lines of a pane's screen snapshot |
+| `kill_pane` | Kill a pane by ID |
+
+**Architecture:**
+
+```
+Claude Desktop / AI agent
+  ─── JSON-RPC 2.0 stdin/stdout ──▶ McpServer (hom-mcp)
+                                         │
+                           McpRequest channel (hom-core types)
+                                         │
+                                    App event loop (hom-tui)
+                                         │
+                               McpResponse (oneshot sender)
+```
+
+**Key types (`hom-core`):**
+
+```rust
+pub struct McpRequest {
+    pub command: McpCommand,
+    pub reply: tokio::sync::oneshot::Sender<McpResponse>,
+}
+
+pub enum McpCommand {
+    SpawnPane { harness: HarnessType, model: Option<String> },
+    SendToPane { pane_id: PaneId, text: String },
+    RunWorkflow { path: String },
+    ListPanes,
+    GetPaneOutput { pane_id: PaneId, lines: usize },
+    KillPane { pane_id: PaneId },
+}
+```
+
+**Crate:** `crates/hom-mcp/src/` — `lib.rs`, `server.rs`, `handler.rs`, `protocol.rs`, `tools.rs`.
+
+### 4.11 Plugin System
 
 The plugin system lets users load custom harness adapters at runtime without recompiling HOM. Plugins expose a stable C ABI so they can be built independently — even in languages other than Rust.
 
@@ -759,30 +833,42 @@ The plugin system lets users load custom harness adapters at runtime without rec
 - **`hom_plugin_destroy`** — cleanup contract called by the loader when the plugin is unregistered or HOM exits; plugins must free any resources allocated by their vtable functions
 - **Safety** — `dlopen` + FFI calls are wrapped in `unsafe` blocks; each block carries a `// SAFETY:` comment documenting the ABI contract and lifetime requirements
 
-**C ABI vtable (`hom-plugin/src/lib.rs`):**
+**C ABI vtable (`hom-plugin/src/ffi.rs`):**
 
 ```rust
-#[repr(C)]
-pub struct HomPluginVtable {
-    pub abi_version: u32,  // must equal HOM_PLUGIN_ABI_VERSION
-    pub harness_type: extern "C" fn() -> *const c_char,
-    pub display_name: extern "C" fn() -> *const c_char,
-    pub build_command: extern "C" fn(config_json: *const c_char, out_json: *mut c_char, out_len: usize) -> i32,
-    pub translate_input: extern "C" fn(kind: HomInputKind, text: *const c_char, out: *mut c_char, out_len: usize) -> i32,
-    pub detect_completion: extern "C" fn(screen_json: *const c_char) -> i32,
-    pub destroy: extern "C" fn(),
-}
+/// ABI version this build of HOM expects.
+/// Increment when any vtable field changes position, size, or semantics.
+pub const HOM_PLUGIN_ABI_VERSION: usize = 1;
 
+/// Input command kind passed to translate_input.
 #[repr(u32)]
 pub enum HomInputKind {
-    Prompt  = 0,
-    Cancel  = 1,
-    Accept  = 2,
-    Reject  = 3,
+    Prompt = 0,
+    Cancel = 1,
+    Accept = 2,
+    Reject = 3,
+    Raw    = 4,  // text is hex-encoded bytes
 }
 
-pub const HOM_PLUGIN_ABI_VERSION: u32 = 1;
+/// Stable C ABI vtable — 1 usize + 8 fn pointers = 72 bytes on 64-bit.
+/// Functions returning *mut c_char allocate a heap string; caller frees via free_str.
+/// display_name/binary_name return static strings — do NOT call free_str on them.
+#[repr(C)]
+pub struct HomPluginVtable {
+    pub abi_version:      usize,
+    pub display_name:     extern "C" fn() -> *const c_char,
+    pub binary_name:      extern "C" fn() -> *const c_char,
+    pub build_command:    extern "C" fn(config_json: *const c_char) -> *mut c_char,
+    pub translate_input:  extern "C" fn(cmd_type: HomInputKind, text: *const c_char) -> *mut c_char,
+    pub parse_screen:     extern "C" fn(screen_json: *const c_char) -> *mut c_char,
+    pub detect_completion: extern "C" fn(screen_json: *const c_char) -> *mut c_char,
+    pub free_str:         extern "C" fn(s: *mut c_char),
+    pub capabilities:     extern "C" fn() -> *mut c_char,
+}
 ```
+
+`translate_input` returns hex-encoded bytes (e.g. `"48656c6c6f0a"` = `"Hello\n"`); the loader decodes them via `decode_hex_bytes()`.
+Plugin vtable size is asserted at test time — `HOM_PLUGIN_ABI_VERSION` must be bumped if any field is added, reordered, or resized.
 
 ---
 
@@ -915,7 +1001,7 @@ The render FPS from `config.general.render_fps` controls the tick rate of the ma
 
 ```
 hom/
-├── Cargo.toml                    # Workspace root (Rust 2024 edition)
+├── Cargo.toml                    # Workspace root (Rust 2024 edition, 10 crates)
 ├── CLAUDE.md                     # Development rules and project context
 ├── hom-system-design.md          # This document
 ├── .claude/
@@ -943,30 +1029,31 @@ hom/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── types.rs          # PaneId, HarnessType, LayoutKind, etc.
+│   │       ├── types.rs          # PaneId, HarnessType, LayoutKind, PaneKind, McpRequest…
 │   │       ├── traits.rs         # TerminalBackend, HarnessAdapter, SidebandChannel
 │   │       ├── error.rs          # HomError (thiserror)
 │   │       └── config.rs         # HomConfig, GeneralConfig, HarnessEntry
 │   │
 │   ├── hom-terminal/             # Terminal emulation (ghostty default, vt100 opt-in fallback)
-│   │   ├── Cargo.toml            # depends on libghostty-vt (default); vt100-backend opt-in
+│   │   ├── Cargo.toml            # default = ["ghostty-backend"]; vt100-backend opt-in
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── ghostty.rs        # GhosttyBackend — fully implemented, default (needs Zig ≥0.15.x)
+│   │       ├── ghostty.rs        # GhosttyBackend — default (needs Zig ≥0.15.x)
 │   │       ├── fallback_vt100.rs # Vt100Backend — opt-in fallback (no external deps)
 │   │       └── color_map.rs      # Terminal color → ratatui color mapping
 │   │
-│   ├── hom-pty/                  # PTY management
-│   │   ├── Cargo.toml            # depends on portable-pty, tokio
+│   ├── hom-pty/                  # PTY management (local + remote)
+│   │   ├── Cargo.toml            # depends on portable-pty, ssh2, tokio
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── manager.rs        # PtyManager: spawn, read, write, resize, kill
-│   │       └── async_reader.rs   # AsyncPtyReader: tokio channel bridge
+│   │       ├── manager.rs        # PtyManager: local PTY spawn/read/write/resize/kill
+│   │       ├── async_reader.rs   # AsyncPtyReader: tokio channel bridge + abort()
+│   │       └── remote.rs         # RemotePtyManager: SSH channel lifecycle (ssh2)
 │   │
 │   ├── hom-adapters/             # Harness adapters (all 7)
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── lib.rs            # AdapterRegistry
+│   │       ├── lib.rs            # AdapterRegistry (built-in + plugin)
 │   │       ├── claude_code.rs
 │   │       ├── codex.rs
 │   │       ├── pi_mono.rs
@@ -990,28 +1077,52 @@ hom/
 │   │       └── checkpoint.rs     # WorkflowCheckpoint: JSON serialization
 │   │
 │   ├── hom-tui/                  # TUI rendering + input handling
-│   │   ├── Cargo.toml            # depends on ratatui, crossterm
+│   │   ├── Cargo.toml            # depends on ratatui, crossterm, hom-core…hom-web
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── app.rs            # App state, spawn_pane, poll_pty_output
+│   │       ├── app.rs            # App state, spawn_pane, pty_write, poll_pty_output
 │   │       ├── render.rs         # Frame rendering, welcome screen
 │   │       ├── pane_render.rs    # Cell-by-cell terminal → ratatui mapping
 │   │       ├── input.rs          # InputRouter: pane input vs command bar vs WorkflowControl
-│   │       ├── command_bar.rs    # Command parsing with --var, --dir, quote stripping
+│   │       ├── command_bar.rs    # Command parsing: --var, --dir, --remote, --model, :load-plugin
 │   │       ├── layout.rs         # HSplit, VSplit, Grid layout computation
-│   │       ├── status_rail.rs    # Top bar: HOM branding, pane count, workflow status
+│   │       ├── status_rail.rs    # Top bar: HOM branding, pane count, cost, workflow status
 │   │       ├── db_checkpoint.rs  # DbCheckpointStore: CheckpointStore trait → hom-db
 │   │       ├── workflow_bridge.rs # Channel bridge between TUI event loop and WorkflowExecutor
 │   │       └── workflow_progress.rs # WorkflowProgress type for F9 step-count display
 │   │
-│   └── hom-db/                   # Storage layer
-│       ├── Cargo.toml            # depends on sqlx (SQLite)
+│   ├── hom-db/                   # Storage layer
+│   │   ├── Cargo.toml            # depends on sqlx (SQLite)
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── migrations/       # SQL migrations (001_initial.sql)
+│   │       ├── session.rs        # Session save/restore CRUD
+│   │       ├── workflow.rs       # Workflow + step state persistence
+│   │       └── cost.rs           # Cost tracking (log_cost, total_cost)
+│   │
+│   ├── hom-mcp/                  # MCP JSON-RPC 2.0 server (--mcp flag)
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── server.rs         # McpServer: reads stdin, writes stdout, channels to App
+│   │       ├── handler.rs        # McpHandler: dispatches commands, builds McpRequest
+│   │       ├── protocol.rs       # JSON-RPC 2.0 types
+│   │       └── tools.rs          # tool_list() — 6 exposed tools
+│   │
+│   ├── hom-web/                  # WebSocket live pane viewer (--web flag)
+│   │   ├── Cargo.toml            # depends on axum, tokio-tungstenite
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── server.rs         # WebServer: axum HTTP + WebSocket; broadcasts WebFrame
+│   │       └── frame.rs          # WebCell, WebPane, WebFrame, WebInput types
+│   │
+│   └── hom-plugin/               # C ABI plugin system
+│       ├── Cargo.toml            # depends on hom-core, libloading
 │       └── src/
 │           ├── lib.rs
-│           ├── migrations/       # SQL migrations (001_initial.sql)
-│           ├── session.rs        # Session save/restore CRUD
-│           ├── workflow.rs       # Workflow + step state persistence
-│           └── cost.rs           # Cost tracking (log_cost, total_cost)
+│           ├── ffi.rs            # HomPluginVtable, HomInputKind, HOM_PLUGIN_ABI_VERSION
+│           ├── loader.rs         # PluginLoader: dlopen, scan_dir, default_plugin_dir
+│           └── adapter.rs        # PluginAdapter: HarnessAdapter impl via vtable FFI
 │
 ├── src/
 │   └── main.rs                   # Binary entry point: CLI, event loop, command dispatch
@@ -1031,10 +1142,13 @@ hom/
 hom-core         → (no internal deps — root of the dependency tree)
 hom-terminal     → hom-core
 hom-pty          → hom-core
-hom-adapters     → hom-core
+hom-plugin       → hom-core
+hom-adapters     → hom-core, hom-plugin
 hom-workflow     → hom-core
 hom-db           → hom-core
-hom-tui          → hom-core, hom-terminal, hom-pty, hom-adapters, hom-workflow, hom-db
+hom-mcp          → hom-core
+hom-web          → hom-core
+hom-tui          → hom-core, hom-terminal, hom-pty, hom-adapters, hom-workflow, hom-db, hom-web
 src/main.rs      → all crates
 ```
 
@@ -1072,6 +1186,12 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
 # HTTP client (OpenCode sideband) — rustls to avoid native OpenSSL dep
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+# SSH remote pane
+ssh2 = "0.9"
+
+# Web UI
+axum = "0.8"
 
 # Configuration
 toml = "1.1"
@@ -1124,9 +1244,10 @@ async-trait = "0.1"
 | Tests | E2E PTY pipeline | **RESOLVED** — spawn→read (echo), spawn→write→read (cat), PTY→Vt100→ScreenSnapshot |
 | Tests | Terminal emulator integration | **RESOLVED** — 6 vt100 unit tests (plain text, ANSI color, resize, cursor, scroll, attrs) + 4 async pipeline integration tests in `crates/hom-terminal/tests/async_pipeline.rs` |
 | Performance | NFR benchmarks | **VALIDATED** — all 4 measurable NFRs pass: NF1 47µs (<16ms), NF2 12.8µs/1kkeys (<50ms), NF3 20.2MB (<30MB at default 5k scrollback), NF4 9.3µs (<500ms) |
-| Web UI | WebSocket live pane viewer | **RESOLVED** — `hom-web` crate with axum 0.8; `WebFrame` broadcast to all clients after each tick; Canvas2D cell renderer; per-pane keyboard input via `pane_id`; `--web` / `--web-port` flags |
-| Remote Pane | SSH remote harness spawning | **RESOLVED** — `RemoteTarget` + `PaneKind::Remote`; `RemotePtyManager` in `hom-pty/src/remote.rs`; `ssh2 = "0.9"` dep; auth chain: agent → id_ed25519 → id_rsa; `:spawn <harness> --remote user@host[:port]` |
-| Plugin System | Runtime harness adapter loading | **RESOLVED** — `hom-plugin` crate; `HomPluginVtable` `#[repr(C)]`; `HomInputKind` `#[repr(u32)]`; `HOM_PLUGIN_ABI_VERSION = 1` guard; `PluginLoader::scan_dir`; auto-scan `~/.config/hom/plugins/` at startup; `:load-plugin <path>` command |
+| Web UI | WebSocket live pane viewer | **RESOLVED** — `hom-web` crate with axum 0.8; `WebFrame { ts, panes: Vec<WebPane> }` broadcast after each tick; Canvas2D cell renderer; per-pane keyboard input via `WebInput { pane_id, text }`; `--web` / `--web-port` flags |
+| Remote Pane | SSH remote harness spawning | **RESOLVED** — `RemoteTarget` + `PaneKind::Remote(RemoteTarget)`; `RemotePtyManager` in `hom-pty/src/remote.rs`; `ssh2 = "0.9"` dep; auth chain: agent → id_ed25519 → id_rsa; `:spawn <harness> --remote user@host[:port]` |
+| Plugin System | Runtime harness adapter loading | **RESOLVED** — `hom-plugin` crate; `HomPluginVtable` `#[repr(C)]` (9 fields, 72 bytes); `HomInputKind` `#[repr(u32)]`; `HOM_PLUGIN_ABI_VERSION: usize = 1` guard; `PluginLoader::scan_dir`; auto-scan `~/.config/hom/plugins/` at startup; `:load-plugin <path>` command |
+| MCP Server | JSON-RPC 2.0 tool provider | **RESOLVED** — `hom-mcp` crate; 6 tools (spawn_pane, send_to_pane, run_workflow, list_panes, get_pane_output, kill_pane); `--mcp` flag; channel-based IPC with App event loop |
 
 ---
 
@@ -1207,7 +1328,7 @@ async-trait = "0.1"
 - ~~Workflow template library~~ → 8 built-in templates (Phase 4)
 - ~~Cost display in status rail~~ → total cost shown as `$X.XX` (Phase 4)
 - ~~Workflow progress tracking~~ → `WorkflowProgress` type + step counts in status rail (Phase 4)
-- ~~Terminal emulator integration tests~~ → 5 vt100 tests (Phase 4)
+- ~~Terminal emulator integration tests~~ → 6 vt100 unit tests + 4 async pipeline integration tests (Phase 4)
 - ~~Graceful PTY shutdown~~ → `App::shutdown()` + `PtyManager::kill_all()` (Phase 5)
 - ~~Process crash handling~~ → `[EXITED: N]` in red (Phase 5)
 - ~~Database reliability~~ → fail fast on error, `--no-db` flag (Phase 5)
