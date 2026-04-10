@@ -336,11 +336,14 @@ hom/
 - Process crash handling — exited panes show [EXITED: N] in red, pending workflow steps notified
 - Database reliability — fail fast on DB error with clear message, --no-db for explicit opt-out
 
+**Resolved (April 10, 2026 — Phase 6 Required):**
+- detect_completion() improved — last_non_empty_line() + anchored starts_with() patterns per adapter, error detection added
+- RPC get_events() implemented — non-blocking try_lock + 1ms timeout, parses JSON-RPC notifications
+- End-to-end PTY pipeline tests — spawn→read (echo), spawn→write→read (cat), PTY→Vt100→ScreenSnapshot
+
 **Remaining work — documentation and hardening:**
 - Run NFR benchmarks against targets (60fps, <30MB, <50ms) — benchmarks exist but not yet validated
 - GhosttyBackend wiring when libghostty-vt is published
-- Improve detect_completion() per-adapter patterns (reduce false positives)
-- End-to-end integration tests with real harness processes
 
 ## Superpowers Integration
 
