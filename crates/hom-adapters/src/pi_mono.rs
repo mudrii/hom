@@ -183,4 +183,71 @@ mod tests {
             CompletionStatus::Running
         ));
     }
+
+    // ── build_command ─────────────────────────────────────
+
+    fn default_config() -> HarnessConfig {
+        HarnessConfig::new(HarnessType::PiMono, ".".into())
+    }
+
+    #[test]
+    fn test_build_command_default() {
+        let adapter = PiMonoAdapter::new();
+        let spec = adapter.build_command(&default_config());
+        assert_eq!(spec.program, "pi");
+        assert!(spec.args.is_empty(), "no args when no model or extra_args");
+    }
+
+    #[test]
+    fn test_build_command_with_model() {
+        let adapter = PiMonoAdapter::new();
+        let config = default_config().with_model("kimi-k2");
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--model", "kimi-k2"]);
+    }
+
+    #[test]
+    fn test_build_command_extra_args() {
+        let adapter = PiMonoAdapter::new();
+        let mut config = default_config();
+        config.extra_args = vec!["--verbose".to_string()];
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--verbose"]);
+    }
+
+    // ── translate_input ───────────────────────────────────
+
+    #[test]
+    fn test_translate_prompt() {
+        let adapter = PiMonoAdapter::new();
+        let bytes = adapter.translate_input(&OrchestratorCommand::Prompt("fix it".to_string()));
+        assert_eq!(bytes, b"fix it\n");
+    }
+
+    #[test]
+    fn test_translate_cancel() {
+        let adapter = PiMonoAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Cancel),
+            vec![0x03]
+        );
+    }
+
+    #[test]
+    fn test_translate_accept() {
+        let adapter = PiMonoAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Accept),
+            b"y\n"
+        );
+    }
+
+    #[test]
+    fn test_translate_reject() {
+        let adapter = PiMonoAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Reject),
+            b"n\n"
+        );
+    }
 }

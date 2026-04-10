@@ -195,4 +195,80 @@ mod tests {
             CompletionStatus::Running
         ));
     }
+
+    // ── build_command ─────────────────────────────────────
+
+    fn default_config() -> HarnessConfig {
+        HarnessConfig::new(HarnessType::OpenCode, ".".into())
+    }
+
+    #[test]
+    fn test_build_command_default() {
+        let adapter = OpenCodeAdapter::new();
+        let spec = adapter.build_command(&default_config());
+        assert_eq!(spec.program, "opencode");
+        assert!(spec.args.is_empty(), "no args when no model or extra_args");
+    }
+
+    #[test]
+    fn test_build_command_with_model() {
+        let adapter = OpenCodeAdapter::new();
+        let config = default_config().with_model("claude-sonnet-4-5");
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--model", "claude-sonnet-4-5"]);
+    }
+
+    #[test]
+    fn test_build_command_extra_args() {
+        let adapter = OpenCodeAdapter::new();
+        let mut config = default_config();
+        config.extra_args = vec!["--port".to_string(), "4096".to_string()];
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--port", "4096"]);
+    }
+
+    #[test]
+    fn test_build_command_unaffected_by_sideband_url() {
+        // sideband_url configures the HTTP client, not the spawned process
+        let adapter = OpenCodeAdapter::new().with_url("http://localhost:9999");
+        let spec = adapter.build_command(&default_config());
+        assert_eq!(spec.program, "opencode");
+        assert!(spec.args.is_empty());
+    }
+
+    // ── translate_input ───────────────────────────────────
+
+    #[test]
+    fn test_translate_prompt() {
+        let adapter = OpenCodeAdapter::new();
+        let bytes = adapter.translate_input(&OrchestratorCommand::Prompt("fix it".to_string()));
+        assert_eq!(bytes, b"fix it\n");
+    }
+
+    #[test]
+    fn test_translate_cancel() {
+        let adapter = OpenCodeAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Cancel),
+            vec![0x03]
+        );
+    }
+
+    #[test]
+    fn test_translate_accept() {
+        let adapter = OpenCodeAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Accept),
+            b"y\n"
+        );
+    }
+
+    #[test]
+    fn test_translate_reject() {
+        let adapter = OpenCodeAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Reject),
+            b"n\n"
+        );
+    }
 }

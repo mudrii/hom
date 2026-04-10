@@ -183,4 +183,71 @@ mod tests {
             CompletionStatus::Running
         ));
     }
+
+    // ── build_command ─────────────────────────────────────
+
+    fn default_config() -> HarnessConfig {
+        HarnessConfig::new(HarnessType::GeminiCli, ".".into())
+    }
+
+    #[test]
+    fn test_build_command_default() {
+        let adapter = GeminiAdapter::new();
+        let spec = adapter.build_command(&default_config());
+        assert_eq!(spec.program, "gemini");
+        assert!(spec.args.is_empty(), "no args when no model or extra_args");
+    }
+
+    #[test]
+    fn test_build_command_with_model() {
+        let adapter = GeminiAdapter::new();
+        let config = default_config().with_model("gemini-2.0-flash");
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--model", "gemini-2.0-flash"]);
+    }
+
+    #[test]
+    fn test_build_command_extra_args() {
+        let adapter = GeminiAdapter::new();
+        let mut config = default_config();
+        config.extra_args = vec!["--sandbox".to_string()];
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--sandbox"]);
+    }
+
+    // ── translate_input ───────────────────────────────────
+
+    #[test]
+    fn test_translate_prompt() {
+        let adapter = GeminiAdapter::new();
+        let bytes = adapter.translate_input(&OrchestratorCommand::Prompt("hello".to_string()));
+        assert_eq!(bytes, b"hello\n");
+    }
+
+    #[test]
+    fn test_translate_cancel() {
+        let adapter = GeminiAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Cancel),
+            vec![0x03]
+        );
+    }
+
+    #[test]
+    fn test_translate_accept() {
+        let adapter = GeminiAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Accept),
+            b"y\n"
+        );
+    }
+
+    #[test]
+    fn test_translate_reject() {
+        let adapter = GeminiAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Reject),
+            b"n\n"
+        );
+    }
 }

@@ -204,4 +204,80 @@ mod tests {
             CompletionStatus::Running
         ));
     }
+
+    // ── build_command ─────────────────────────────────────
+
+    fn default_config() -> HarnessConfig {
+        HarnessConfig::new(HarnessType::CopilotCli, ".".into())
+    }
+
+    #[test]
+    fn test_build_command_default() {
+        let adapter = CopilotAdapter::new();
+        let spec = adapter.build_command(&default_config());
+        assert_eq!(spec.program, "copilot");
+        assert!(
+            spec.args.is_empty(),
+            "no args when no acp_mode, model, or extra_args"
+        );
+    }
+
+    #[test]
+    fn test_build_command_acp_mode_prepends_flags() {
+        let adapter = CopilotAdapter::new().with_acp();
+        let spec = adapter.build_command(&default_config());
+        assert_eq!(&spec.args[..2], &["--acp", "--stdio"]);
+    }
+
+    #[test]
+    fn test_build_command_acp_with_model() {
+        let adapter = CopilotAdapter::new().with_acp();
+        let config = default_config().with_model("gpt-4o");
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--acp", "--stdio", "--model", "gpt-4o"]);
+    }
+
+    #[test]
+    fn test_build_command_with_model_no_acp() {
+        let adapter = CopilotAdapter::new();
+        let config = default_config().with_model("gpt-4o");
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--model", "gpt-4o"]);
+    }
+
+    // ── translate_input ───────────────────────────────────
+
+    #[test]
+    fn test_translate_prompt() {
+        let adapter = CopilotAdapter::new();
+        let bytes = adapter.translate_input(&OrchestratorCommand::Prompt("fix it".to_string()));
+        assert_eq!(bytes, b"fix it\n");
+    }
+
+    #[test]
+    fn test_translate_cancel() {
+        let adapter = CopilotAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Cancel),
+            vec![0x03]
+        );
+    }
+
+    #[test]
+    fn test_translate_accept() {
+        let adapter = CopilotAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Accept),
+            b"y\n"
+        );
+    }
+
+    #[test]
+    fn test_translate_reject() {
+        let adapter = CopilotAdapter::new();
+        assert_eq!(
+            adapter.translate_input(&OrchestratorCommand::Reject),
+            b"n\n"
+        );
+    }
 }
