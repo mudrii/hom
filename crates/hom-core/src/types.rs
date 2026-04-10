@@ -224,7 +224,12 @@ pub struct RemoteTarget {
 }
 
 impl RemoteTarget {
-    /// Parse `user@host` or `user@host:port`. Returns `None` if `@` is absent.
+    /// Parse `user@host` or `user@host:port`. Returns `None` if:
+    /// - The string contains no `@` (not a remote target spec)
+    /// - The port string is present but is not a valid u16 (0..=65535)
+    ///
+    /// Call sites should treat `None` as "invalid remote spec" and show the
+    /// input string in the error message so the user knows what was rejected.
     pub fn parse(s: &str) -> Option<Self> {
         let (user, rest) = s.split_once('@')?;
         let (host, port) = if let Some((h, p)) = rest.rsplit_once(':') {
@@ -277,7 +282,7 @@ impl std::fmt::Display for RemoteTarget {
 }
 
 /// Whether a pane is backed by a local PTY or a remote SSH channel.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PaneKind {
     Local,
     Remote(RemoteTarget),
@@ -372,5 +377,30 @@ mod tests {
         let parts = RemoteTarget::spec_to_argv(&spec);
         assert_eq!(parts[0], "claude");
         assert_eq!(parts[2], "claude opus");
+    }
+
+    #[test]
+    fn remote_target_parse_invalid_port_fails() {
+        // Port 99999 exceeds u16::MAX (65535) — parse returns None
+        assert!(RemoteTarget::parse("user@host:99999").is_none());
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        // "it's" → 'it'\''s'
+        assert_eq!(RemoteTarget::shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn build_remote_command_quotes_all_args() {
+        let spec = CommandSpec {
+            program: "claude".to_string(),
+            args: vec!["--model".to_string(), "claude opus 4".to_string()],
+            env: std::collections::HashMap::new(),
+            working_dir: ".".into(),
+        };
+        let cmd = RemoteTarget::build_remote_command(&spec);
+        // Each arg individually quoted and joined with spaces
+        assert_eq!(cmd, "'claude' '--model' 'claude opus 4'");
     }
 }
