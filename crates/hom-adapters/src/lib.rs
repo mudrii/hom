@@ -26,12 +26,16 @@ pub mod pi_mono;
 pub mod sideband;
 
 use std::collections::HashMap;
+use std::path::Path;
 
-use hom_core::{HarnessAdapter, HarnessType};
+use hom_core::{HarnessAdapter, HarnessType, HomError};
+use hom_plugin::PluginLoader;
 
 /// Registry of all available harness adapters.
 pub struct AdapterRegistry {
     adapters: HashMap<HarnessType, Box<dyn HarnessAdapter>>,
+    /// Plugin adapters keyed by binary name (e.g., "mycli").
+    plugins: HashMap<String, Box<dyn HarnessAdapter>>,
 }
 
 impl AdapterRegistry {
@@ -59,12 +63,51 @@ impl AdapterRegistry {
             Box::new(copilot::CopilotAdapter::new()),
         );
 
-        Self { adapters }
+        Self {
+            adapters,
+            plugins: HashMap::new(),
+        }
     }
 
     /// Get an adapter by harness type.
     pub fn get(&self, harness: &HarnessType) -> Option<&dyn HarnessAdapter> {
         self.adapters.get(harness).map(|a| a.as_ref())
+    }
+
+    /// Get a plugin adapter by its binary name.
+    ///
+    /// Does NOT check the built-in adapter map. Use `get()` for built-in harnesses.
+    pub fn get_plugin(&self, name: &str) -> Option<&dyn HarnessAdapter> {
+        self.plugins.get(name).map(|a| a.as_ref())
+    }
+
+    /// Load a plugin from a `.dylib`/`.so` file and register it by binary name.
+    ///
+    /// Returns the plugin's binary name on success.
+    pub fn load_plugin(&mut self, path: &Path) -> Result<String, HomError> {
+        let adapter = PluginLoader::load(path)?;
+        let name = adapter.plugin_name();
+        self.plugins.insert(name.clone(), Box::new(adapter));
+        Ok(name)
+    }
+
+    /// Scan a directory and register all loadable plugins.
+    ///
+    /// Silently skips files that fail to load. Returns the names of loaded plugins.
+    pub fn load_plugins_from_dir(&mut self, dir: &Path) -> Vec<String> {
+        PluginLoader::scan_dir(dir)
+            .into_iter()
+            .map(|adapter| {
+                let name = adapter.plugin_name();
+                self.plugins.insert(name.clone(), Box::new(adapter));
+                name
+            })
+            .collect()
+    }
+
+    /// Names of all loaded plugin adapters.
+    pub fn plugin_names(&self) -> Vec<String> {
+        self.plugins.keys().cloned().collect()
     }
 
     /// List all registered harness types.
@@ -136,5 +179,24 @@ mod tests {
                 "adapter registered under {harness:?} returns wrong harness_type()"
             );
         }
+    }
+
+    #[test]
+    fn registry_get_plugin_unknown_returns_none() {
+        let registry = AdapterRegistry::new();
+        assert!(registry.get_plugin("unknown-plugin").is_none());
+    }
+
+    #[test]
+    fn registry_load_plugin_nonexistent_path_returns_error() {
+        let mut registry = AdapterRegistry::new();
+        let result = registry.load_plugin(std::path::Path::new("/nonexistent/plugin.dylib"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn registry_plugin_names_empty_initially() {
+        let registry = AdapterRegistry::new();
+        assert!(registry.plugin_names().is_empty());
     }
 }

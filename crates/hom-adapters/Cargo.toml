@@ -3,9 +3,12 @@ name = "hom-adapters"
 version.workspace = true
 edition.workspace = true
 description = "Harness adapter implementations for all 7 supported AI coding agents"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 hom-core.workspace = true
+hom-plugin.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 serde.workspace = true
