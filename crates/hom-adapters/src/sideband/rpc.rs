@@ -154,10 +154,79 @@ impl SidebandChannel for RpcSideband {
     }
 
     async fn get_events(&self) -> HomResult<Vec<HarnessEvent>> {
-        if self.stdin.get().is_none() {
-            return Ok(Vec::new());
+        let stdout_lock = match self.stdout.get() {
+            Some(lock) => lock,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut events = Vec::new();
+
+        // Try to acquire stdout lock without blocking — if send_prompt holds it, skip.
+        let mut stdout = match stdout_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        // Non-blocking: read available lines with 1ms timeout
+        loop {
+            let mut line = String::new();
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(1),
+                stdout.read_line(&mut line),
+            )
+            .await
+            {
+                Ok(Ok(0)) => break,
+                Ok(Ok(_)) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    // Notifications have no "id" field
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+                        && val.get("id").is_none()
+                        && let Some(method) = val.get("method").and_then(|m| m.as_str())
+                    {
+                        match method {
+                            "task_started" => {
+                                let desc = val
+                                    .get("params")
+                                    .and_then(|p| p.get("description"))
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                events.push(HarnessEvent::TaskStarted { description: desc });
+                            }
+                            "task_completed" => {
+                                let summary = val
+                                    .get("params")
+                                    .and_then(|p| p.get("summary"))
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                events.push(HarnessEvent::TaskCompleted { summary });
+                            }
+                            "error" => {
+                                let message = val
+                                    .get("params")
+                                    .and_then(|p| p.get("message"))
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                events.push(HarnessEvent::Error { message });
+                            }
+                            _ => {
+                                debug!(method, "unknown RPC notification");
+                            }
+                        }
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => break, // timeout — no more data available
+            }
         }
-        Ok(Vec::new())
+
+        Ok(events)
     }
 
     async fn health_check(&self) -> HomResult<bool> {
