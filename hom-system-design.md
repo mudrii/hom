@@ -299,7 +299,8 @@ The `App` struct in `hom-tui` owns all runtime state: panes, PTY manager, adapte
 ```rust
 pub fn spawn_pane_with_opts(
     &mut self,
-    harness_type: HarnessType,
+    harness: Option<HarnessType>,
+    harness_name: &str,
     model: Option<String>,
     working_dir: Option<PathBuf>,
     extra_args: Vec<String>,
@@ -370,7 +371,7 @@ pub struct CommandSpec {
 ```rust
 impl AdapterRegistry {
     pub fn new() -> Self { /* registers all 7 adapters */ }
-    pub fn get(&self, harness: HarnessType) -> &dyn HarnessAdapter;
+    pub fn get(&self, harness: &HarnessType) -> Option<&dyn HarnessAdapter>;
 }
 ```
 
@@ -653,7 +654,7 @@ fn render_pane(frame: &mut Frame, area: Rect, pane: &Pane, focused: bool) {
 
     // Map each cell: character, fg/bg color, bold/italic/underline/dim/strikethrough
     for (row_idx, row) in screen.rows.iter().enumerate() {
-        for (col_idx, cell) in row.cells.iter().enumerate() {
+        for (col_idx, cell) in row.iter().enumerate() {
             // ... map to ratatui buffer cell
         }
     }
@@ -742,10 +743,10 @@ Remote panes run a harness process on a remote machine over SSH, bridging the re
 - **`RemoteTarget`** — parsed from `user@host[:port]`; stored in `PaneKind::Remote(RemoteTarget)`
 - **`RemotePtyManager`** in `crates/hom-pty/src/remote.rs` — uses `ssh2 = "0.9"` to establish an SSH session, open a channel with a PTY, and spawn the remote harness command
 - **Auth chain** — tried in order: SSH agent (via `$SSH_AUTH_SOCK`) → `~/.ssh/id_ed25519` → `~/.ssh/id_rsa`
-- **Remote command** — the harness `CommandSpec` is shell-quoted and executed on the remote host; environment variables from the adapter config are forwarded via `channel.setenv()`
+- **Remote command** — the harness `CommandSpec` is shell-quoted via `RemoteTarget::shell_quote()` before being sent to the remote SSH channel; no environment variables are forwarded (no `setenv` calls)
 - **PTY bridging** — the `RemotePtyManager` exposes the same read/write/resize interface as the local `PtyManager`; the rest of the TUI stack (terminal emulation, rendering, input routing) is unaware of the transport
 
-**Key types (`hom-pty`):**
+**Key types (`hom-core`):**
 
 ```rust
 pub struct RemoteTarget {
@@ -801,12 +802,12 @@ pub struct McpRequest {
 }
 
 pub enum McpCommand {
-    SpawnPane { harness: HarnessType, model: Option<String> },
-    SendToPane { pane_id: PaneId, text: String },
-    RunWorkflow { path: String },
+    SpawnPane { harness: String, model: Option<String> },
+    SendToPane { pane_id: String, text: String },
+    RunWorkflow { path: String, vars: HashMap<String, String> },
     ListPanes,
-    GetPaneOutput { pane_id: PaneId, lines: usize },
-    KillPane { pane_id: PaneId },
+    GetPaneOutput { pane_id: String, lines: usize },
+    KillPane { pane_id: String },
 }
 ```
 
