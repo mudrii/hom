@@ -14,4 +14,4 @@ pub mod parser;
 pub use executor::{
     CheckpointStore, StepResultRecord, WorkflowExecutor, WorkflowResult, WorkflowRuntime,
 };
-pub use parser::WorkflowDef;
+pub use parser::{BackoffKind, WorkflowDef};

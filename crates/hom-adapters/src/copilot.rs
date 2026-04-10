@@ -122,13 +122,7 @@ impl HarnessAdapter for CopilotAdapter {
         }
     }
 
-    fn sideband(&self) -> Option<Box<dyn SidebandChannel>> {
-        if self.acp_mode {
-            Some(Box::new(super::sideband::rpc::RpcSideband::new(
-                "copilot".to_string(),
-            )))
-        } else {
-            None
-        }
-    }
+    // Sideband is constructed from config at spawn time in App::spawn_pane_inner(),
+    // not from this trait method. The config entry specifies the correct program
+    // and sideband_url for the ACP subprocess.
 }

@@ -34,6 +34,8 @@ pub enum Action {
     NextPane,
     /// Focus the previous pane.
     PrevPane,
+    /// Kill the focused pane.
+    KillPane(PaneId),
     /// No action needed.
     None,
 }
@@ -50,6 +52,7 @@ pub struct InputRouter {
     pub mode: InputMode,
     toggle_command_bar: Keybinding,
     next_pane: Keybinding,
+    prev_pane: Keybinding,
     kill_pane: Keybinding,
 }
 
@@ -64,6 +67,10 @@ impl InputRouter {
             next_pane: Keybinding {
                 code: KeyCode::Tab,
                 modifiers: KeyModifiers::CONTROL,
+            },
+            prev_pane: Keybinding {
+                code: KeyCode::Tab,
+                modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             },
             kill_pane: Keybinding {
                 code: KeyCode::Char('w'),
@@ -80,6 +87,9 @@ impl InputRouter {
         }
         if let Some(kb) = parse_keybinding(&config.next_pane) {
             router.next_pane = kb;
+        }
+        if let Some(kb) = parse_keybinding(&config.prev_pane) {
+            router.prev_pane = kb;
         }
         if let Some(kb) = parse_keybinding(&config.kill_pane) {
             router.kill_pane = kb;
@@ -129,12 +139,14 @@ impl InputRouter {
             // ── Next pane (configurable) ──────────────────────────
             (_, Event::Key(ke)) if matches_keybinding(ke, &self.next_pane) => Action::NextPane,
 
+            // ── Previous pane (configurable) ─────────────────────
+            (_, Event::Key(ke)) if matches_keybinding(ke, &self.prev_pane) => Action::PrevPane,
+
             // ── Kill pane (configurable) ──────────────────────────
             (InputMode::PaneInput { focused }, Event::Key(ke))
                 if matches_keybinding(ke, &self.kill_pane) =>
             {
-                let id = *focused;
-                Action::WriteToPty(id, vec![]) // signal kill via empty bytes — handled by caller
+                Action::KillPane(*focused)
             }
 
             // ── In pane mode, forward all keys to PTY ─────────────
@@ -234,6 +246,72 @@ fn parse_keybinding(s: &str) -> Option<Keybinding> {
     };
 
     Some(Keybinding { code, modifiers })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_single_key() {
+        let kb = parse_keybinding("tab").unwrap();
+        assert_eq!(kb.code, KeyCode::Tab);
+        assert!(kb.modifiers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ctrl_key() {
+        let kb = parse_keybinding("ctrl-w").unwrap();
+        assert_eq!(kb.code, KeyCode::Char('w'));
+        assert!(kb.modifiers.contains(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn test_parse_ctrl_backtick() {
+        let kb = parse_keybinding("ctrl-`").unwrap();
+        assert_eq!(kb.code, KeyCode::Char('`'));
+        assert!(kb.modifiers.contains(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn test_parse_ctrl_tab() {
+        let kb = parse_keybinding("ctrl-tab").unwrap();
+        assert_eq!(kb.code, KeyCode::Tab);
+        assert!(kb.modifiers.contains(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn test_parse_ctrl_shift_tab() {
+        let kb = parse_keybinding("ctrl-shift-tab").unwrap();
+        assert_eq!(kb.code, KeyCode::Tab);
+        assert!(kb.modifiers.contains(KeyModifiers::CONTROL));
+        assert!(kb.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn test_parse_f_key() {
+        let kb = parse_keybinding("ctrl-f1").unwrap();
+        assert_eq!(kb.code, KeyCode::F(1));
+        assert!(kb.modifiers.contains(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn test_parse_invalid() {
+        assert!(parse_keybinding("").is_none());
+        assert!(parse_keybinding("mega-x").is_none());
+    }
+
+    #[test]
+    fn test_encode_ctrl_c() {
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key_event(&key), vec![0x03]);
+    }
+
+    #[test]
+    fn test_encode_enter() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(encode_key_event(&key), vec![b'\r']);
+    }
 }
 
 /// Encode a crossterm key event into raw bytes for a PTY.

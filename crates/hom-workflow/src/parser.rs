@@ -39,19 +39,27 @@ pub struct StepDef {
 }
 
 /// Retry policy for a step.
+/// Retry policy for a step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryDef {
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
-    #[serde(default = "default_backoff")]
-    pub backoff: String,
+    #[serde(default)]
+    pub backoff: BackoffKind,
+}
+
+/// Backoff strategy for step retries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackoffKind {
+    #[default]
+    Exponential,
+    Linear,
+    Fixed,
 }
 
 fn default_max_attempts() -> u32 {
     3
-}
-fn default_backoff() -> String {
-    "exponential".to_string()
 }
 
 /// What to do when a step fails.

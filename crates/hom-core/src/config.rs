@@ -169,7 +169,7 @@ impl HomConfig {
 }
 
 /// Expand `${VAR}` patterns in a string using environment variables.
-/// Unknown variables are left as-is.
+/// Unknown variables and unterminated `${` are left as-is.
 fn expand_env_vars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -178,19 +178,26 @@ fn expand_env_vars(input: &str) -> String {
         if c == '$' && chars.peek() == Some(&'{') {
             chars.next(); // consume '{'
             let mut var_name = String::new();
+            let mut found_close = false;
             for ch in chars.by_ref() {
                 if ch == '}' {
+                    found_close = true;
                     break;
                 }
                 var_name.push(ch);
             }
-            match std::env::var(&var_name) {
-                Ok(val) => result.push_str(&val),
-                Err(_) => {
-                    // Leave unexpanded
-                    result.push_str("${");
-                    result.push_str(&var_name);
-                    result.push('}');
+            if !found_close {
+                // Unterminated ${...  — preserve literal text
+                result.push_str("${");
+                result.push_str(&var_name);
+            } else {
+                match std::env::var(&var_name) {
+                    Ok(val) => result.push_str(&val),
+                    Err(_) => {
+                        result.push_str("${");
+                        result.push_str(&var_name);
+                        result.push('}');
+                    }
                 }
             }
         } else {
@@ -230,6 +237,12 @@ mod tests {
     fn test_expand_env_vars_dollar_without_brace() {
         let result = expand_env_vars("$HOME is not expanded");
         assert_eq!(result, "$HOME is not expanded");
+    }
+
+    #[test]
+    fn test_expand_env_vars_unterminated() {
+        let result = expand_env_vars("prefix ${UNTERMINATED");
+        assert_eq!(result, "prefix ${UNTERMINATED");
     }
 
     #[test]

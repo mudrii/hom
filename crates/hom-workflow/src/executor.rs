@@ -14,7 +14,7 @@ use hom_core::{HomError, HomResult};
 use crate::checkpoint::WorkflowCheckpoint;
 use crate::condition::evaluate_condition;
 use crate::dag::WorkflowDag;
-use crate::parser::{FailureAction, WorkflowDef};
+use crate::parser::{BackoffKind, FailureAction, WorkflowDef};
 
 /// Result of executing a single step.
 #[derive(Debug, Clone)]
@@ -203,11 +203,12 @@ impl WorkflowExecutor {
             // Steps with unmet conditions are skipped before spawning.
             let mut runnable_steps = Vec::new();
             for step_id in &ready {
-                let step_def = def
-                    .steps
-                    .iter()
-                    .find(|s| s.id == *step_id)
-                    .expect("ready_steps returned unknown step id");
+                let step_def = def.steps.iter().find(|s| s.id == *step_id).ok_or_else(|| {
+                    HomError::WorkflowStepFailed {
+                        step: step_id.clone(),
+                        reason: "DAG returned unknown step ID".to_string(),
+                    }
+                })?;
 
                 if let Some(condition) = &step_def.condition
                     && !evaluate_condition(condition, &step_outputs, &step_statuses)
@@ -259,7 +260,7 @@ impl WorkflowExecutor {
                     .retry
                     .as_ref()
                     .map(|r| r.backoff.clone())
-                    .unwrap_or_else(|| "none".to_string());
+                    .unwrap_or_default();
 
                 let on_failure = step_def.on_failure.clone();
 
@@ -321,6 +322,9 @@ impl WorkflowExecutor {
                         model,
                         prompt,
                     } => {
+                        let duration_ms = result.duration.as_millis() as i64;
+                        let attempt = result.attempt as i32;
+
                         step_statuses.insert(step_id.clone(), "completed".to_string());
                         step_results.insert(step_id.clone(), result);
                         completed.push(step_id.clone());
@@ -340,7 +344,6 @@ impl WorkflowExecutor {
                             {
                                 warn!(step = %step_id, error = %e, "checkpoint persistence failed");
                             }
-                            let sr = step_results.get(&step_id).unwrap();
                             if let Err(e) = store
                                 .save_step_result(StepResultRecord {
                                     workflow_id: &workflow_id,
@@ -350,8 +353,8 @@ impl WorkflowExecutor {
                                     status: "completed",
                                     prompt: &prompt,
                                     output: &output,
-                                    duration_ms: sr.duration.as_millis() as i64,
-                                    attempt: sr.attempt as i32,
+                                    duration_ms,
+                                    attempt,
                                 })
                                 .await
                             {
@@ -481,7 +484,7 @@ struct RunnableStep {
     rendered_prompt: String,
     timeout: Duration,
     max_attempts: u32,
-    backoff_kind: String,
+    backoff_kind: BackoffKind,
     on_failure: Option<FailureAction>,
     fallback_info: Option<(String, String, Option<String>, String, Duration)>,
 }
@@ -614,19 +617,14 @@ async fn execute_step(runtime: Arc<dyn WorkflowRuntime>, step: RunnableStep) -> 
 }
 
 /// Compute backoff delay for a retry attempt.
-fn compute_backoff(kind: &str, attempt: u32) -> Duration {
+fn compute_backoff(kind: &BackoffKind, attempt: u32) -> Duration {
     match kind {
-        "exponential" => {
-            // 1s, 2s, 4s, 8s, capped at 30s
+        BackoffKind::Exponential => {
             let secs = (1u64 << (attempt - 1).min(4)).min(30);
             Duration::from_secs(secs)
         }
-        "linear" => {
-            // 2s, 4s, 6s, 8s, ...
-            Duration::from_secs((attempt as u64) * 2)
-        }
-        "fixed" => Duration::from_secs(2),
-        _ => Duration::from_secs(1),
+        BackoffKind::Linear => Duration::from_secs((attempt as u64) * 2),
+        BackoffKind::Fixed => Duration::from_secs(2),
     }
 }
 
@@ -858,23 +856,49 @@ steps:
 
     #[test]
     fn test_compute_backoff_exponential() {
-        assert_eq!(compute_backoff("exponential", 1), Duration::from_secs(1));
-        assert_eq!(compute_backoff("exponential", 2), Duration::from_secs(2));
-        assert_eq!(compute_backoff("exponential", 3), Duration::from_secs(4));
-        assert_eq!(compute_backoff("exponential", 5), Duration::from_secs(16));
-        // Shift is capped at 4 bits (1<<4=16), then min(30)=16
-        assert_eq!(compute_backoff("exponential", 10), Duration::from_secs(16));
+        assert_eq!(
+            compute_backoff(&BackoffKind::Exponential, 1),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            compute_backoff(&BackoffKind::Exponential, 2),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            compute_backoff(&BackoffKind::Exponential, 3),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            compute_backoff(&BackoffKind::Exponential, 5),
+            Duration::from_secs(16)
+        );
+        assert_eq!(
+            compute_backoff(&BackoffKind::Exponential, 10),
+            Duration::from_secs(16)
+        );
     }
 
     #[test]
     fn test_compute_backoff_linear() {
-        assert_eq!(compute_backoff("linear", 1), Duration::from_secs(2));
-        assert_eq!(compute_backoff("linear", 3), Duration::from_secs(6));
+        assert_eq!(
+            compute_backoff(&BackoffKind::Linear, 1),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            compute_backoff(&BackoffKind::Linear, 3),
+            Duration::from_secs(6)
+        );
     }
 
     #[test]
     fn test_compute_backoff_fixed() {
-        assert_eq!(compute_backoff("fixed", 1), Duration::from_secs(2));
-        assert_eq!(compute_backoff("fixed", 5), Duration::from_secs(2));
+        assert_eq!(
+            compute_backoff(&BackoffKind::Fixed, 1),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            compute_backoff(&BackoffKind::Fixed, 5),
+            Duration::from_secs(2)
+        );
     }
 }

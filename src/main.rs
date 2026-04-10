@@ -130,10 +130,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Store bridge in OnceLock so handle_command can access it for :run
-    let _ = WORKFLOW_BRIDGE.set(bridge);
-
-    let result = run_app(&mut terminal, &mut app, tick_rate, workflow_rx).await;
+    let result = run_app(&mut terminal, &mut app, tick_rate, workflow_rx, bridge).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -153,6 +150,7 @@ async fn run_app(
     app: &mut App,
     tick_rate: Duration,
     mut workflow_rx: WorkflowRequestRx,
+    bridge: Arc<WorkflowBridge>,
 ) -> anyhow::Result<()> {
     loop {
         // Draw
@@ -219,11 +217,14 @@ async fn run_app(
                 }
                 Action::CommandBarInput(key) => {
                     if let Some(cmd) = app.command_bar.handle_key(key) {
-                        handle_command(app, cmd, size)?;
+                        handle_command(app, cmd, size, &bridge)?;
                     }
                 }
                 Action::NextPane => app.focus_next(),
                 Action::PrevPane => app.focus_prev(),
+                Action::KillPane(pane_id) => {
+                    let _ = app.kill_pane(pane_id);
+                }
                 Action::None => {}
             }
         }
@@ -270,15 +271,11 @@ async fn run_app(
     Ok(())
 }
 
-/// Shared Arc<WorkflowBridge> stored by handle_command for :run.
-/// We use a thread-local to avoid changing the handle_command signature,
-/// since the bridge is created once and reused.
-static WORKFLOW_BRIDGE: std::sync::OnceLock<Arc<WorkflowBridge>> = std::sync::OnceLock::new();
-
 fn handle_command(
     app: &mut App,
     cmd: hom_tui::command_bar::Command,
     terminal_size: ratatui::layout::Rect,
+    bridge: &Arc<WorkflowBridge>,
 ) -> anyhow::Result<()> {
     use hom_tui::command_bar::Command;
 
@@ -451,17 +448,12 @@ fn handle_command(
                             "workflow loaded, launching executor"
                         );
                         // Spawn the workflow executor in a background task
-                        if let Some(bridge) = WORKFLOW_BRIDGE.get() {
-                            let bridge_clone = bridge.clone();
-                            let db = app.db.clone();
-                            let wf_name = workflow.clone();
-                            tokio::spawn(async move {
-                                run_workflow_task(def, bridge_clone, variables, db, &wf_name).await;
-                            });
-                        } else {
-                            app.command_bar.last_error =
-                                Some("workflow bridge not initialized".to_string());
-                        }
+                        let bridge_clone = bridge.clone();
+                        let db = app.db.clone();
+                        let wf_name = workflow.clone();
+                        tokio::spawn(async move {
+                            run_workflow_task(def, bridge_clone, variables, db, &wf_name).await;
+                        });
                     }
                     Err(e) => {
                         app.command_bar.last_error = Some(format!("workflow parse error: {e}"));
