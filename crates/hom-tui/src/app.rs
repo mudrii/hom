@@ -327,17 +327,34 @@ impl App {
     }
 
     /// Process PTY output for all panes — feed bytes into terminal emulators.
-    pub fn poll_pty_output(&mut self) {
+    /// Returns any token usage events detected via adapter parse_screen().
+    pub fn poll_pty_output(&mut self) -> Vec<(PaneId, HarnessType, hom_core::HarnessEvent)> {
+        let mut token_events = Vec::new();
         let pane_ids: Vec<PaneId> = self.panes.keys().copied().collect();
         for pane_id in pane_ids {
+            let mut had_data = false;
             if let Some(pane) = self.panes.get_mut(&pane_id)
                 && let Some(reader) = &mut pane.pty_reader
             {
                 while let Ok(data) = reader.rx.try_recv() {
                     pane.terminal.process(&data);
+                    had_data = true;
+                }
+            }
+
+            // After processing new data, scan for token usage events
+            if had_data && let Some(pane) = self.panes.get(&pane_id) {
+                let snapshot = pane.terminal.screen_snapshot();
+                if let Some(adapter) = self.adapter_registry.get(&pane.harness_type) {
+                    for event in adapter.parse_screen(&snapshot) {
+                        if matches!(event, hom_core::HarnessEvent::TokenUsage { .. }) {
+                            token_events.push((pane_id, pane.harness_type, event));
+                        }
+                    }
                 }
             }
         }
+        token_events
     }
 
     /// Serialize the current session (layout + pane configs) for persistence.

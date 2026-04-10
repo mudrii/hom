@@ -229,7 +229,27 @@ async fn run_app(
         }
 
         // Poll PTY output and feed into terminal emulators
-        app.poll_pty_output();
+        let token_events = app.poll_pty_output();
+
+        // Log any token usage events to the database
+        if !token_events.is_empty()
+            && let Some(ref db) = app.db
+        {
+            for (pane_id, harness_type, event) in &token_events {
+                if let hom_core::HarnessEvent::TokenUsage { input, output } = event {
+                    let db = db.clone();
+                    let harness = harness_type.display_name().to_string();
+                    let pane = *pane_id;
+                    let inp = *input as i64;
+                    let out = *output as i64;
+                    tokio::spawn(async move {
+                        let _ =
+                            hom_db::cost::log_cost(db.pool(), pane, &harness, None, inp, out, 0.0)
+                                .await;
+                    });
+                }
+            }
+        }
 
         // Check pending workflow completions (detect_completion polling)
         app.poll_pending_completions();
@@ -683,8 +703,8 @@ async fn run_workflow_task(
                 duration_ms = wf_result.duration.as_millis() as u64,
                 "workflow completed"
             );
-            // Update DB
             if let Some(ref db) = db {
+                // Update workflow status
                 let status_str = format!("{:?}", wf_result.status);
                 let _ = hom_db::workflow::update_workflow_status(
                     db.pool(),
@@ -693,6 +713,16 @@ async fn run_workflow_task(
                     None,
                 )
                 .await;
+
+                // Log cost for each completed step
+                for (step_id, step_result) in &wf_result.step_results {
+                    if step_result.status == hom_workflow::executor::StepStatus::Completed
+                        && let Err(e) =
+                            hom_db::cost::log_cost(db.pool(), 0, step_id, None, 0, 0, 0.0).await
+                    {
+                        warn!(step = %step_id, error = %e, "cost logging failed");
+                    }
+                }
             }
         }
         Err(e) => {
