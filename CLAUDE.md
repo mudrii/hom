@@ -4,7 +4,7 @@
 
 HOM is a Rust-based TUI terminal multiplexer and orchestrator for 7 AI coding agent CLI harnesses. It spawns REAL native harness TUIs in visual panes — users see and interact with each harness directly. The orchestrator coordinates inputs/outputs between harnesses, translates commands to harness-native formats, and executes user-defined YAML workflows.
 
-**This is NOT a headless orchestrator.** Each pane runs a real harness process in a pseudoterminal, rendered through a full terminal emulator (vt100 default, libghostty-rs target) mapped cell-by-cell into ratatui buffers.
+**This is NOT a headless orchestrator.** Each pane runs a real harness process in a pseudoterminal, rendered through a full terminal emulator (ghostty default, vt100 opt-in fallback) mapped cell-by-cell into ratatui buffers.
 
 ## Environment
 
@@ -39,6 +39,7 @@ HOM is a Rust-based TUI terminal multiplexer and orchestrator for 7 AI coding ag
 | `hom-workflow` | YAML parser, petgraph DAG, step executor with retry/timeout/templating, condition evaluator |
 | `hom-tui` | App state, pane rendering, input router, command bar parser, layout engine, status rail |
 | `hom-db` | SQLite via sqlx — workflows, steps, sessions, cost_log |
+| `hom-mcp` | MCP server — JSON-RPC 2.0 over stdin/stdout, 6 tools, `--mcp` flag |
 
 ## Key Technical Decisions
 
@@ -88,11 +89,12 @@ Workspace: add `--workspace` to check/test/nextest/clippy. Feature/doc changes: 
 - `hom-workflow` depends on `hom-core` only
 - `hom-tui` depends on `hom-core`, `hom-terminal`, `hom-pty`, `hom-adapters`, `hom-workflow`, `hom-db`
 - `hom-db` depends on `hom-core` only
+- `hom-mcp` depends on `hom-core` only
 - The binary (`src/main.rs`) depends on all crates
 
 ### Feature flags
-- `vt100-backend` (default) — builds with vt100 crate, no external deps
-- `ghostty-backend` — builds with libghostty-rs, requires Zig ≥0.15.x
+- `ghostty-backend` (default) — builds with libghostty-vt, requires Zig ≥0.15.x
+- `vt100-backend` (opt-in fallback) — builds with vt100 crate, no external deps; use `--no-default-features --features vt100-backend`
 
 ## Design Principles
 
@@ -365,6 +367,18 @@ hom/
 - Mouse passthrough — `encode_mouse_event` encodes X10 protocol bytes; `EnableMouseCapture`/`DisableMouseCapture` wired in main.rs setup/teardown; `PaneInput` arm forwards non-focus mouse events to focused PTY
 - Adapter smoke tests — `build_command`/`translate_input` tests added for all 7 adapters; `AdapterRegistry` smoke tests in `lib.rs` (91 tests total in hom-adapters)
 - GhosttyBackend CI — `.github/workflows/ci.yml` `ghostty` job added (self-hosted, zig label); `scripts/seed-zig-cache.sh` documents one-time runner provisioning
+
+**Resolved (April 10, 2026 — Feature flag swap):**
+- `ghostty-backend` promoted to default feature — `crates/hom-terminal/Cargo.toml` default changed from `vt100-backend` to `ghostty-backend`
+- `vt100-backend` is now the opt-in fallback: `cargo build --no-default-features --features vt100-backend`
+- All docs updated: CLAUDE.md, hom-system-design.md, hom-architecture.html, README.md, skills/hom-terminal-integration/SKILL.md
+
+**Resolved (April 10, 2026 — MCP Server):**
+- hom-mcp crate — JSON-RPC 2.0 MCP server over stdin/stdout
+- Six tools: spawn_pane, send_to_pane, run_workflow, list_panes, get_pane_output, kill_pane
+- `--mcp` flag spawns McpServer as a tokio task alongside the TUI
+- McpRequest/McpResponse types in hom-core; channel-based IPC with App
+- RunWorkflow via MCP returns a diagnostic error (WorkflowBridge lives in main.rs — a future refactor can move it into App)
 
 **No remaining stubs** — all features are implemented. GhosttyBackend runtime validation requires network access during Zig build.
 
