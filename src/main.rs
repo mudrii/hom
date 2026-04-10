@@ -178,6 +178,11 @@ async fn run_app(
     let cost_poll_interval = fps; // poll every `fps` ticks ≈ 1 second
     let mut cost_tick_counter: u64 = 0;
 
+    // Sideband health polling: check every ~5 seconds (5 * fps ticks).
+    let health_poll_interval = fps * 5;
+    let mut health_tick_counter: u64 = 0;
+    let (health_tx, mut health_rx) = tokio::sync::mpsc::unbounded_channel::<(u32, String, bool)>();
+
     loop {
         // Draw
         terminal.draw(|frame| {
@@ -298,6 +303,35 @@ async fn run_app(
         // Drain cost results into app state
         while let Ok(cost) = cost_rx.try_recv() {
             app.total_cost = cost;
+        }
+
+        // Poll sideband health every ~5 seconds
+        health_tick_counter += 1;
+        if health_tick_counter >= health_poll_interval {
+            health_tick_counter = 0;
+            for pane_id in &app.pane_order {
+                if let Some(pane) = app.panes.get(pane_id)
+                    && let Some(sideband) = &pane.sideband
+                {
+                    let sideband = sideband.clone();
+                    let harness_name = pane.harness_type.display_name().to_string();
+                    let pid = *pane_id;
+                    let tx = health_tx.clone();
+                    tokio::spawn(async move {
+                        let healthy = sideband.health_check().await.unwrap_or(false);
+                        let _ = tx.send((pid, harness_name, healthy));
+                    });
+                }
+            }
+        }
+        // Drain health check results — notify on failure
+        while let Ok((pane_id, harness_name, healthy)) = health_rx.try_recv() {
+            if !healthy {
+                warn!(pane_id, harness_name, "sideband health check failed");
+                app.command_bar.last_error = Some(format!(
+                    "sideband for pane #{pane_id} ({harness_name}) is not responding"
+                ));
+            }
         }
 
         // Check for exited processes and handle them
