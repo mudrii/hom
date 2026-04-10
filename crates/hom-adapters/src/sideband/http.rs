@@ -143,3 +143,43 @@ impl SidebandChannel for HttpSideband {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_http_sideband_new() {
+        let sb = HttpSideband::new("http://localhost:4096".to_string());
+        assert_eq!(sb.base_url, "http://localhost:4096");
+        assert!(sb.session_id.is_none());
+    }
+
+    #[test]
+    fn test_http_sideband_with_session() {
+        let sb = HttpSideband::new("http://localhost:4096".to_string()).with_session("42".into());
+        assert_eq!(sb.session_id.as_deref(), Some("42"));
+    }
+
+    #[tokio::test]
+    async fn test_health_check_unreachable() {
+        // Health check against a non-existent server should return false, not error
+        let sb = HttpSideband::new("http://127.0.0.1:19999".to_string());
+        let result = sb.health_check().await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_send_prompt_unreachable() {
+        let sb = HttpSideband::new("http://127.0.0.1:19999".to_string());
+        let result = sb.send_prompt("hello").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_events_unreachable() {
+        let sb = HttpSideband::new("http://127.0.0.1:19999".to_string());
+        let events = sb.get_events().await.unwrap();
+        assert!(events.is_empty());
+    }
+}
