@@ -1,0 +1,75 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Publish in strict dependency order.
+      # --no-verify skips rebuilding from the tarball; safe for workspace crates
+      # where path deps resolve only after all crates are published.
+      # Each sleep gives crates.io time to index before dependents are published.
+
+      - name: Publish hom-core
+        run: cargo publish -p hom-core --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for hom-core indexing
+        run: sleep 30
+
+      - name: Publish hom-terminal
+        run: cargo publish -p hom-terminal --no-verify --no-default-features --features vt100-backend
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish hom-pty
+        run: cargo publish -p hom-pty --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish hom-adapters
+        run: cargo publish -p hom-adapters --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish hom-workflow
+        run: cargo publish -p hom-workflow --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish hom-db
+        run: cargo publish -p hom-db --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for leaf crates to be indexed
+        run: sleep 60
+
+      - name: Publish hom-tui
+        run: cargo publish -p hom-tui --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for hom-tui indexing
+        run: sleep 30
+
+      - name: Publish hom (binary)
+        run: cargo publish --no-verify --no-default-features --features vt100-backend
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

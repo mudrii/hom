@@ -107,3 +107,19 @@ The dependency rules are strict:
 ## License
 
 By contributing you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
+
+## Release process
+
+1. Bump the version in `[workspace.package]` in `Cargo.toml`.
+2. Update `CHANGELOG.md` if one exists.
+3. Commit: `git commit -m "chore: release v0.2.0"`
+4. Tag: `git tag v0.2.0 && git push origin v0.2.0`
+
+This triggers two workflows automatically:
+- **release.yml** — builds binaries for macOS and Linux, uploads to GitHub Releases, renders Homebrew formula
+- **publish.yml** — publishes all 8 crates to crates.io in dependency order
+
+### One-time setup for publish.yml
+
+Add your crates.io API token as a repository secret named `CARGO_REGISTRY_TOKEN`:
+Settings → Secrets and variables → Actions → New repository secret
