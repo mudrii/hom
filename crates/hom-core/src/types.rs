@@ -214,6 +214,75 @@ pub enum LayoutKind {
     Tabbed,
 }
 
+/// SSH connection target for remote panes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTarget {
+    pub user: String,
+    pub host: String,
+    /// SSH port. Defaults to 22.
+    pub port: u16,
+}
+
+impl RemoteTarget {
+    /// Parse `user@host` or `user@host:port`. Returns `None` if `@` is absent.
+    pub fn parse(s: &str) -> Option<Self> {
+        let (user, rest) = s.split_once('@')?;
+        let (host, port) = if let Some((h, p)) = rest.rsplit_once(':') {
+            let port: u16 = p.parse().ok()?;
+            (h.to_string(), port)
+        } else {
+            (rest.to_string(), 22)
+        };
+        Some(Self {
+            user: user.to_string(),
+            host,
+            port,
+        })
+    }
+
+    pub fn addr(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    /// Return the command spec as a Vec of individual argument strings.
+    pub fn spec_to_argv(spec: &crate::CommandSpec) -> Vec<String> {
+        std::iter::once(spec.program.clone())
+            .chain(spec.args.iter().cloned())
+            .collect()
+    }
+
+    /// Shell-quote a single argument (POSIX single-quote wrapping).
+    pub fn shell_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+
+    /// Build a shell-safe command string for `ssh2::Channel::exec()`.
+    pub fn build_remote_command(spec: &crate::CommandSpec) -> String {
+        Self::spec_to_argv(spec)
+            .iter()
+            .map(|a| Self::shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+impl std::fmt::Display for RemoteTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.port == 22 {
+            write!(f, "{}@{}", self.user, self.host)
+        } else {
+            write!(f, "{}@{}:{}", self.user, self.host, self.port)
+        }
+    }
+}
+
+/// Whether a pane is backed by a local PTY or a remote SSH channel.
+#[derive(Debug, Clone)]
+pub enum PaneKind {
+    Local,
+    Remote(RemoteTarget),
+}
+
 // ── MCP server ────────────────────────────────────────────────────────
 
 /// A command sent from the MCP server to the TUI app, with a channel to receive
@@ -254,4 +323,54 @@ pub struct PaneSummary {
     pub pane_id: String,
     pub harness: String,
     pub status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CommandSpec;
+
+    #[test]
+    fn remote_target_parse_with_port() {
+        let t = RemoteTarget::parse("alice@example.com:2222").unwrap();
+        assert_eq!(t.user, "alice");
+        assert_eq!(t.host, "example.com");
+        assert_eq!(t.port, 2222);
+    }
+
+    #[test]
+    fn remote_target_parse_default_port() {
+        let t = RemoteTarget::parse("bob@10.0.0.5").unwrap();
+        assert_eq!(t.user, "bob");
+        assert_eq!(t.host, "10.0.0.5");
+        assert_eq!(t.port, 22);
+    }
+
+    #[test]
+    fn remote_target_parse_missing_at_fails() {
+        assert!(RemoteTarget::parse("notaremote").is_none());
+    }
+
+    #[test]
+    fn pane_kind_is_remote() {
+        let kind = PaneKind::Remote(RemoteTarget {
+            user: "u".into(),
+            host: "h".into(),
+            port: 22,
+        });
+        assert!(matches!(kind, PaneKind::Remote(_)));
+    }
+
+    #[test]
+    fn remote_target_shell_args_are_individually_quoted() {
+        let spec = CommandSpec {
+            program: "claude".to_string(),
+            args: vec!["--model".to_string(), "claude opus".to_string()],
+            env: std::collections::HashMap::new(),
+            working_dir: ".".into(),
+        };
+        let parts = RemoteTarget::spec_to_argv(&spec);
+        assert_eq!(parts[0], "claude");
+        assert_eq!(parts[2], "claude opus");
+    }
 }
