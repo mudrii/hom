@@ -1,6 +1,6 @@
 # HOM: Harness Orchestration Management TUI — System Design Document
 
-**Version:** 3.2 | **Date:** April 10, 2026 | **Status:** Architecture & Implementation Status
+**Version:** 3.3 | **Date:** April 11, 2026 | **Status:** Architecture & Implementation Status
 
 ---
 
@@ -61,10 +61,10 @@ A full working product that can:
 | Constraint | Detail |
 |------------|--------|
 | Language | Rust (performance, safety, stability) — 2024 edition, MSRV 1.85 |
-| Terminal emulation (current default) | `vt100` crate — working default backend, pure Rust, no external build deps |
-| Terminal emulation (target primary) | `libghostty-rs` — target primary backend, best-in-class VT emulation, Kitty protocol support. Fully implemented with `libghostty-vt 0.1.1`; opt-in via `--features ghostty-backend` |
-| Build dependency | None for default build (`vt100-backend`). Zig ≥0.15.x required when `ghostty-backend` feature is enabled |
-| API stability risk | libghostty-rs is v0.1.1, pre-1.0 — plan for API churn. Abstracted behind `TerminalBackend` trait with vt100 as working fallback |
+| Terminal emulation (default) | `libghostty-rs` (`libghostty-vt 0.1.1`) — default backend, best-in-class VT emulation, Kitty protocol support. Fully implemented. |
+| Terminal emulation (opt-in fallback) | `vt100` crate — pure Rust, no external build deps. Enable with `--no-default-features --features vt100-backend` |
+| Build dependency | Zig ≥0.15.x required for default build (`ghostty-backend`). No external deps when using `vt100-backend` fallback. |
+| API stability risk | libghostty-rs is v0.1.1, pre-1.0 — plan for API churn. Abstracted behind `TerminalBackend` trait with vt100 as opt-in fallback |
 
 ---
 
@@ -176,7 +176,7 @@ YAML file → WorkflowDef::from_file() → WorkflowDag::from_steps()
 
 ### 4.1 Terminal Emulation Layer
 
-Each pane embeds a full terminal emulator instance behind the `TerminalBackend` trait. The current working default is the `vt100` crate (`Vt100Backend`), which provides solid VT100/VT220 emulation with zero external build dependencies. The target primary backend is `libghostty-rs` (`GhosttyBackend`), which provides best-in-class VT emulation with Kitty keyboard and graphics protocol support — fully implemented with `libghostty-vt 0.1.1`, opt-in via `--features ghostty-backend`.
+Each pane embeds a full terminal emulator instance behind the `TerminalBackend` trait. The default backend is `libghostty-rs` (`GhosttyBackend`), which provides best-in-class VT emulation with Kitty keyboard and graphics protocol support — fully implemented with `libghostty-vt 0.1.1`, requires Zig ≥0.15.x at build time. The opt-in fallback is the `vt100` crate (`Vt100Backend`), which provides solid VT100/VT220 emulation with zero external build dependencies, enabled via `--no-default-features --features vt100-backend`.
 
 #### Architecture
 
@@ -195,9 +195,9 @@ Each pane embeds a full terminal emulator instance behind the `TerminalBackend` 
 │  ┌───────────────────────────────────────┐  │
 │  │  TerminalBackend (trait)              │  │
 │  │                                       │  │
-│  │  Default: Vt100Backend (vt100 crate)  │  │
-│  │  Target:  GhosttyBackend              │  │
+│  │  Default: GhosttyBackend              │  │
 │  │    (libghostty-rs, needs Zig ≥0.15.x)  │  │
+│  │  Fallback: Vt100Backend (vt100 crate) │  │
 │  │                                       │  │
 │  │  - Processes VT escape sequences      │  │
 │  │  - Maintains screen buffer            │  │
@@ -227,26 +227,27 @@ Each pane embeds a full terminal emulator instance behind the `TerminalBackend` 
 4. cmux proves this exact use case (terminal multiplexer on libghostty) works
 5. GPU rendering pipeline available for complex terminal output
 
-**Current default — `Vt100Backend`:**
-- Feature flag: `vt100-backend` (default, always on)
-- Dependency: `vt100 = "0.16"` — stable, pure Rust, no external build deps
-- Capabilities: VT100/VT220 escape sequences, color, cursor, alternate screen, scrollback
-- Status: **Fully implemented and working**
-
-**Target primary — `GhosttyBackend`:**
-- Feature flag: `ghostty-backend` (opt-in)
+**Default — `GhosttyBackend`:**
+- Feature flag: `ghostty-backend` (default)
 - Dependency: `libghostty-vt = "0.1.1"` (requires Zig ≥0.15.x at build time; Zig compiles Ghostty's C VT library)
 - Capabilities: Full Kitty keyboard + graphics protocol, alternate screen, scrollback, GPU rendering
-- Status: **Fully implemented** — all `TerminalBackend` trait methods wired; 7 unit tests pass; `unsafe impl Send + Sync` with documented single-threaded safety invariant
-- API churn note: pre-1.0 library — abstracted behind `TerminalBackend` trait so vt100 works as fallback
+- Status: **Fully implemented** — all `TerminalBackend` trait methods wired; 8 unit tests pass; `unsafe impl Send + Sync` with documented single-threaded safety invariant
+- API churn note: pre-1.0 library — abstracted behind `TerminalBackend` trait so vt100 works as opt-in fallback
+
+**Opt-in fallback — `Vt100Backend`:**
+- Feature flag: `vt100-backend` (opt-in)
+- Build: `cargo build --no-default-features --features vt100-backend`
+- Dependency: `vt100 = "0.16"` — stable, pure Rust, no external build deps
+- Capabilities: VT100/VT220 escape sequences, color, cursor, alternate screen, scrollback
+- Status: **Fully implemented and working** — use for environments without Zig ≥0.15.x
 
 **Build system:**
 ```toml
 # crates/hom-terminal/Cargo.toml
 [features]
-default = ["vt100-backend"]
-vt100-backend = ["dep:vt100"]
-ghostty-backend = ["dep:libghostty-vt"]  # opt-in; requires Zig ≥0.15.x
+default = ["ghostty-backend"]
+ghostty-backend = ["dep:libghostty-vt"]  # default; requires Zig ≥0.15.x
+vt100-backend = ["dep:vt100"]            # opt-in fallback: --no-default-features --features vt100-backend
 ```
 
 #### The `TerminalBackend` Trait
@@ -545,6 +546,8 @@ pub enum InputMode {
     PaneInput { focused: PaneId },
     /// Input goes to the command bar (triggered by Ctrl-` hotkey)
     CommandBar,
+    /// Workflow is running — input restricted to control commands
+    WorkflowControl,
 }
 ```
 
@@ -655,6 +658,132 @@ fn render_pane(frame: &mut Frame, area: Rect, pane: &Pane, focused: bool) {
 - `VSplit` — vertical split (panes side by side)
 - `Grid` — automatic grid based on pane count
 
+### 4.8 Web UI
+
+`hom-web` is an axum 0.8 HTTP/WebSocket server that broadcasts live pane views to any browser.
+
+**Architecture:**
+
+```
+hom-tui (tick loop)
+  └── after each render tick:
+        ScreenSnapshot serialised → WebFrame (JSON)
+          └── broadcast channel → all connected WebSocket clients
+                                       └── browser: Canvas2D cell renderer
+```
+
+- **`--web` flag** — enables the web server at startup; binds `localhost:4242` by default
+- **`--web-port <N>` flag** — overrides the bind port
+- **`WebFrame`** — serialised `ScreenSnapshot`: rows of cells with character, fg/bg color (ANSI 256-color palette), and text attributes
+- **Canvas2D renderer** — XSS-safe (`fillText`, no `innerHTML`); renders the full ANSI 256-color palette
+- **Keyboard input** — browser keystrokes are forwarded to the target pane via a `WebInput` channel; routed by `pane_id` so the web client can target any pane, not just the focused one
+- **Error handling** — `WebServer::run()` returns `anyhow::Result<()>`; bind/serve errors are propagated and logged, not panicked
+
+**Key types (`hom-web`):**
+
+```rust
+pub struct WebFrame {
+    pub pane_id: u32,
+    pub rows: Vec<Vec<WebCell>>,
+    pub cursor: Option<(u16, u16)>,
+    pub timestamp_ms: u64,
+}
+
+pub struct WebCell {
+    pub ch: char,
+    pub fg: u32,   // ANSI 256-color index or RGB packed
+    pub bg: u32,
+    pub attrs: u8, // bold | italic | underline | dim | ...
+}
+
+pub struct WebInput {
+    pub pane_id: u32,
+    pub key: String,   // e.g. "Enter", "Backspace", printable chars
+}
+```
+
+### 4.9 Remote Pane
+
+Remote panes run a harness process on a remote machine over SSH, bridging the remote PTY to a local pane as if the harness were running locally.
+
+**Command syntax:**
+
+```
+:spawn claude --remote user@host
+:spawn codex  --remote user@myserver.example.com:2222
+```
+
+**Architecture:**
+
+- **`RemoteTarget`** — parsed from `user@host[:port]`; stored in `PaneKind::Remote { target: RemoteTarget }`
+- **`RemotePtyManager`** in `crates/hom-pty/src/remote.rs` — uses `ssh2 = "0.9"` to establish an SSH session, open a channel with a PTY, and spawn the remote harness command
+- **Auth chain** — tried in order: SSH agent (via `$SSH_AUTH_SOCK`) → `~/.ssh/id_ed25519` → `~/.ssh/id_rsa`
+- **Remote command** — the harness `CommandSpec` is shell-quoted and executed on the remote host; environment variables from the adapter config are forwarded via `channel.setenv()`
+- **PTY bridging** — the `RemotePtyManager` exposes the same read/write/resize interface as the local `PtyManager`; the rest of the TUI stack (terminal emulation, rendering, input routing) is unaware of the transport
+
+**Key types (`hom-pty`):**
+
+```rust
+pub struct RemoteTarget {
+    pub user: String,
+    pub host: String,
+    pub port: u16,  // default 22
+}
+
+pub enum PaneKind {
+    Local,
+    Remote { target: RemoteTarget },
+}
+```
+
+**Dependency:** `ssh2 = "0.9"` added to `crates/hom-pty/Cargo.toml`.
+
+### 4.10 Plugin System
+
+The plugin system lets users load custom harness adapters at runtime without recompiling HOM. Plugins expose a stable C ABI so they can be built independently — even in languages other than Rust.
+
+**Command syntax:**
+
+```
+:load-plugin /path/to/adapter.dylib
+```
+
+**Auto-load at startup:** HOM scans `~/.config/hom/plugins/` and loads all `*.dylib` / `*.so` files found there.
+
+**Architecture:**
+
+- **`hom-plugin` crate** — owns the C ABI definition, the `PluginLoader`, and a `PluginAdapter` wrapper that implements `HarnessAdapter` by calling through the vtable
+- **`HomPluginVtable`** — `#[repr(C)]` struct of function pointers; ABI version guard constant `HOM_PLUGIN_ABI_VERSION = 1` prevents loading incompatible plugins
+- **`HomInputKind`** — `#[repr(u32)]` enum used in the vtable for `translate_input` so plugins receive a stable integer discriminant rather than a Rust enum
+- **`PluginLoader::scan_dir(path)`** — iterates a directory, `dlopen`s each shared library, reads the vtable version, and registers a `PluginAdapter` in the `AdapterRegistry` for each valid plugin
+- **`hom_plugin_destroy`** — cleanup contract called by the loader when the plugin is unregistered or HOM exits; plugins must free any resources allocated by their vtable functions
+- **Safety** — `dlopen` + FFI calls are wrapped in `unsafe` blocks; each block carries a `// SAFETY:` comment documenting the ABI contract and lifetime requirements
+
+**C ABI vtable (`hom-plugin/src/lib.rs`):**
+
+```rust
+#[repr(C)]
+pub struct HomPluginVtable {
+    pub abi_version: u32,  // must equal HOM_PLUGIN_ABI_VERSION
+    pub harness_type: extern "C" fn() -> *const c_char,
+    pub display_name: extern "C" fn() -> *const c_char,
+    pub build_command: extern "C" fn(config_json: *const c_char, out_json: *mut c_char, out_len: usize) -> i32,
+    pub translate_input: extern "C" fn(kind: HomInputKind, text: *const c_char, out: *mut c_char, out_len: usize) -> i32,
+    pub detect_completion: extern "C" fn(screen_json: *const c_char) -> i32,
+    pub destroy: extern "C" fn(),
+}
+
+#[repr(u32)]
+pub enum HomInputKind {
+    Prompt  = 0,
+    Cancel  = 1,
+    Accept  = 2,
+    Reject  = 3,
+}
+
+pub const HOM_PLUGIN_ABI_VERSION: u32 = 1;
+```
+
 ---
 
 ## 5. Storage & State
@@ -717,6 +846,14 @@ CREATE TABLE cost_log (
     tokens_output   INTEGER,
     cost_usd        REAL,
     timestamp       INTEGER
+);
+
+-- Workflow checkpoints (crash recovery)
+CREATE TABLE checkpoints (
+    workflow_id     TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    PRIMARY KEY (workflow_id)
 );
 ```
 
@@ -811,12 +948,12 @@ hom/
 │   │       ├── error.rs          # HomError (thiserror)
 │   │       └── config.rs         # HomConfig, GeneralConfig, HarnessEntry
 │   │
-│   ├── hom-terminal/             # Terminal emulation (vt100 default, libghostty-rs target)
-│   │   ├── Cargo.toml            # depends on vt100 (default); ghostty-backend feature flag
+│   ├── hom-terminal/             # Terminal emulation (ghostty default, vt100 opt-in fallback)
+│   │   ├── Cargo.toml            # depends on libghostty-vt (default); vt100-backend opt-in
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── ghostty.rs        # GhosttyBackend — fully implemented, opt-in (needs Zig ≥0.15.x)
-│   │       ├── fallback_vt100.rs # Vt100Backend — current working default
+│   │       ├── ghostty.rs        # GhosttyBackend — fully implemented, default (needs Zig ≥0.15.x)
+│   │       ├── fallback_vt100.rs # Vt100Backend — opt-in fallback (no external deps)
 │   │       └── color_map.rs      # Terminal color → ratatui color mapping
 │   │
 │   ├── hom-pty/                  # PTY management
@@ -859,10 +996,13 @@ hom/
 │   │       ├── app.rs            # App state, spawn_pane, poll_pty_output
 │   │       ├── render.rs         # Frame rendering, welcome screen
 │   │       ├── pane_render.rs    # Cell-by-cell terminal → ratatui mapping
-│   │       ├── input.rs          # InputRouter: pane input vs command bar
+│   │       ├── input.rs          # InputRouter: pane input vs command bar vs WorkflowControl
 │   │       ├── command_bar.rs    # Command parsing with --var, --dir, quote stripping
 │   │       ├── layout.rs         # HSplit, VSplit, Grid layout computation
-│   │       └── status_rail.rs    # Top bar: HOM branding, pane count, workflow status
+│   │       ├── status_rail.rs    # Top bar: HOM branding, pane count, workflow status
+│   │       ├── db_checkpoint.rs  # DbCheckpointStore: CheckpointStore trait → hom-db
+│   │       ├── workflow_bridge.rs # Channel bridge between TUI event loop and WorkflowExecutor
+│   │       └── workflow_progress.rs # WorkflowProgress type for F9 step-count display
 │   │
 │   └── hom-db/                   # Storage layer
 │       ├── Cargo.toml            # depends on sqlx (SQLite)
@@ -906,8 +1046,8 @@ src/main.rs      → all crates
 # Workspace Cargo.toml [workspace.dependencies]
 
 # Terminal emulation
-libghostty-vt = "0.1.1"           # GhosttyBackend — opt-in via ghostty-backend feature, requires Zig ≥0.15.x
-vt100 = "0.16"                    # Vt100Backend — current default, pure Rust, no external build deps
+libghostty-vt = "0.1.1"           # GhosttyBackend — default backend, requires Zig ≥0.15.x
+vt100 = "0.16"                    # Vt100Backend — opt-in fallback, pure Rust, no external build deps
 
 # PTY management
 portable-pty = "0.9"
@@ -954,7 +1094,7 @@ async-trait = "0.1"
 
 | Area | Item | Status |
 |------|------|--------|
-| Terminal | GhosttyBackend implementation | **RESOLVED** — `libghostty-vt 0.1.1` fully wired; all trait methods implemented; 7 unit tests pass; `unsafe Send + Sync` with documented invariant |
+| Terminal | GhosttyBackend implementation | **RESOLVED** — `libghostty-vt 0.1.1` fully wired; all trait methods implemented; 8 unit tests pass; `unsafe Send + Sync` with documented invariant |
 | Workflow | Parallel execution | **RESOLVED** — `Arc<dyn WorkflowRuntime>` + `JoinSet` for concurrent batch execution |
 | Workflow | SendAndWait completion | **RESOLVED** — `PendingCompletion` polling via `detect_completion()` |
 | Workflow | Sideband async bridge | **RESOLVED** — SendAndWait uses `sideband.send_prompt()` for sideband-capable panes |
@@ -963,7 +1103,7 @@ async-trait = "0.1"
 | Adapters | RPC get_events() | **RESOLVED** — non-blocking `try_lock` + 1ms timeout; parses JSON-RPC notifications |
 | Adapters | `detect_completion()` | **RESOLVED** — `last_non_empty_line()` + anchored `starts_with()` patterns per adapter; error detection added |
 | Adapters | RPC sideband | **RESOLVED** — full JSON-RPC subprocess implementation with stdin/stdout communication |
-| Adapters | HTTP sideband | **RESOLVED** — SSE event polling via GET /global/event, integration tests added |
+| Adapters | HTTP sideband | **RESOLVED** — SSE event polling via GET /global/event; in-module tests in `crates/hom-adapters/src/sideband/http.rs` |
 | Adapters | Copilot ACP | **RESOLVED** — `--acp --stdio` mode support, sideband via JSON-RPC |
 | Adapters | `build_command`/`translate_input` tests | **RESOLVED** — all 7 adapters have `build_command` (default, with model, binary override, extra args) and `translate_input` (prompt, cancel, accept, reject) tests; 91 total tests in hom-adapters |
 | DB | Session save/restore | **RESOLVED** — `:save`/`:restore` wired to `hom_db::session` CRUD with JSON serialization |
@@ -982,8 +1122,11 @@ async-trait = "0.1"
 | TUI | handle_command refactor | **RESOLVED** — per-command handler functions extracted; `handle_spawn`, `handle_save`, `handle_restore`, `handle_run`, etc. |
 | CI | GhosttyBackend CI job | **RESOLVED** — `ghostty` job in `.github/workflows/ci.yml` targets `[self-hosted, zig]` runner; `scripts/seed-zig-cache.sh` provisions Zig package cache |
 | Tests | E2E PTY pipeline | **RESOLVED** — spawn→read (echo), spawn→write→read (cat), PTY→Vt100→ScreenSnapshot |
-| Tests | Terminal emulator integration | **RESOLVED** — 5 vt100 tests: plain text, ANSI color, resize, cursor position, scrollback |
+| Tests | Terminal emulator integration | **RESOLVED** — 6 vt100 unit tests (plain text, ANSI color, resize, cursor, scroll, attrs) + 4 async pipeline integration tests in `crates/hom-terminal/tests/async_pipeline.rs` |
 | Performance | NFR benchmarks | **VALIDATED** — all 4 measurable NFRs pass: NF1 47µs (<16ms), NF2 12.8µs/1kkeys (<50ms), NF3 20.2MB (<30MB at default 5k scrollback), NF4 9.3µs (<500ms) |
+| Web UI | WebSocket live pane viewer | **RESOLVED** — `hom-web` crate with axum 0.8; `WebFrame` broadcast to all clients after each tick; Canvas2D cell renderer; per-pane keyboard input via `pane_id`; `--web` / `--web-port` flags |
+| Remote Pane | SSH remote harness spawning | **RESOLVED** — `RemoteTarget` + `PaneKind::Remote`; `RemotePtyManager` in `hom-pty/src/remote.rs`; `ssh2 = "0.9"` dep; auth chain: agent → id_ed25519 → id_rsa; `:spawn <harness> --remote user@host[:port]` |
+| Plugin System | Runtime harness adapter loading | **RESOLVED** — `hom-plugin` crate; `HomPluginVtable` `#[repr(C)]`; `HomInputKind` `#[repr(u32)]`; `HOM_PLUGIN_ABI_VERSION = 1` guard; `PluginLoader::scan_dir`; auto-scan `~/.config/hom/plugins/` at startup; `:load-plugin <path>` command |
 
 ---
 
@@ -993,11 +1136,11 @@ async-trait = "0.1"
 
 | Decision | Trade-off |
 |----------|-----------|
-| **Target: libghostty-rs** | Best VT emulation quality, Kitty keyboard + graphics protocol, proven in cmux |
-| **Current default: vt100** | Stable, pure Rust, zero external build deps — sufficient for initial development |
-| **Accepted** | Zig ≥0.15.x build dependency and API instability risk for ghostty path |
-| **Mitigated by** | `TerminalBackend` trait abstraction — vt100 works today, ghostty can be swapped in without touching other layers |
-| **Revisit when** | libghostty-rs hits 1.0 (expected late 2026) — can make it the default |
+| **Default: libghostty-rs** | Best VT emulation quality, Kitty keyboard + graphics protocol, proven in cmux |
+| **Opt-in fallback: vt100** | Stable, pure Rust, zero external build deps — for environments without Zig ≥0.15.x |
+| **Accepted** | Zig ≥0.15.x build dependency and API instability risk for default ghostty path |
+| **Mitigated by** | `TerminalBackend` trait abstraction — vt100 works as fallback; ghostty is default but swappable without touching other layers |
+| **Revisit when** | libghostty-rs hits 1.0 (expected late 2026) — stabilise API, consider removing vt100 fallback |
 
 ### 9.2 PTY-first vs headless-first
 
@@ -1017,13 +1160,14 @@ async-trait = "0.1"
 | **Mitigated by** | Condition expressions, minijinja templating, retry policies in YAML |
 | **Revisit when** | Users need Turing-complete workflow logic — add Lua or Rhai scripting |
 
-### 9.4 Single binary vs plugin system
+### 9.4 Single binary + plugin system
 
 | Decision | Trade-off |
 |----------|-----------|
-| **Chose single binary** | Simpler to build, test, distribute |
-| **Accepted** | Adding new harnesses requires recompilation |
-| **Revisit when** | Community wants to add custom adapters — add WASM or shared library plugin system |
+| **Chose C ABI shared library plugins** | Community can add custom adapters without recompiling HOM |
+| **Accepted** | `unsafe` FFI at the plugin boundary; ABI version must be respected |
+| **Mitigated by** | `HOM_PLUGIN_ABI_VERSION` guard rejects incompatible plugins; `// SAFETY:` on every `unsafe` block; `hom_plugin_destroy` contract for clean teardown |
+| **Revisit when** | WASM runtimes (e.g. wasmtime) stabilise enough to replace `dlopen` — WASM would provide memory isolation at the plugin boundary |
 
 ### 9.5 Claude Code rendering quality
 
@@ -1040,8 +1184,8 @@ async-trait = "0.1"
 
 | Risk | Severity | Probability | Mitigation |
 |------|----------|-------------|------------|
-| libghostty-rs API breaking change | High | High (pre-1.0) | Pin commit hash; TerminalBackend trait abstraction; vt100 is the working default until ghostty stabilizes |
-| Zig build fails on user's system | Low | Low | Default build uses vt100 (no Zig needed); Zig only required for opt-in ghostty-backend feature |
+| libghostty-rs API breaking change | High | High (pre-1.0) | Pin commit hash; TerminalBackend trait abstraction; vt100 opt-in fallback available if ghostty API breaks |
+| Zig build fails on user's system | Medium | Low | Fallback build uses vt100 (no Zig needed): `--no-default-features --features vt100-backend`; README documents this clearly |
 | Claude Code flickering in panes | Medium | Certain | Headless mode for workflows, visual for direct interaction only |
 | Screen parsing unreliable for output extraction | Medium | Medium | Start with prompt-based patterns, add sideband channels progressively |
 | PTY input race conditions | Medium | Medium | Wait for shell readiness, configurable delay, use CommandBuilder for initial commands |
@@ -1078,13 +1222,12 @@ async-trait = "0.1"
 - ~~Adapter build_command/translate_input tests~~ → all 7 adapters at 91 tests total (P4 session)
 - ~~GhosttyBackend CI job~~ → `[self-hosted, zig]` runner + seed script (P4 session)
 
+- ~~Web UI~~ → `hom-web` crate with axum 0.8 WebSocket server + Canvas2D renderer (April 11, 2026)
+- ~~Remote pane support~~ → `RemotePtyManager` over ssh2, `:spawn --remote user@host[:port]` (April 11, 2026)
+- ~~Plugin system for adapters~~ → `hom-plugin` crate, `HomPluginVtable` C ABI, auto-scan at startup (April 11, 2026)
+
 **Active future work:**
 1. **Linux platform validation** — `cargo check` + test suite on Linux; NF6 target not yet validated
-2. **GhosttyBackend as default** — promote `ghostty-backend` to the default feature once declared stable (currently opt-in)
-3. **GPU rendering** — leverage libghostty's pipeline for complex output
-4. **Plugin system for adapters** — WASM or shared library plugins
-5. **Remote pane support** — spawn harnesses on remote machines via SSH
-6. **Web UI** — serve ratatui frames over WebSocket
-7. **MCP integration** — expose HOM as an MCP server
-8. **Workflow marketplace** — share and discover templates
-9. **Agent-to-agent protocol** — standardized message format
+2. **GPU rendering** — leverage libghostty's pipeline for complex output
+3. **Workflow marketplace** — share and discover templates
+4. **Agent-to-agent protocol** — standardized message format

@@ -31,6 +31,12 @@ A Rust TUI terminal multiplexer that orchestrates 7 AI coding agent CLIs in a si
 
 HOM lets you run multiple AI coding agents side by side, coordinate them with YAML workflows, and pipe their outputs into each other — all without leaving your terminal. Workflows execute as DAGs: steps run in dependency order, in parallel where possible, with retries, conditions, and SQLite checkpointing.
 
+## New in This Release
+
+- **Web UI** — `hom --web` serves a live Canvas2D view of all panes at `http://localhost:4242`. Any browser can view and interact with panes over WebSocket. Use `--web-port` to override the port.
+- **Remote Panes** — `:spawn <harness> --remote user@host[:port]` runs a harness on a remote machine over SSH. Auth via SSH agent, `~/.ssh/id_ed25519`, or `~/.ssh/id_rsa`.
+- **Plugin System** — Load custom harness adapters at runtime: `:load-plugin /path/to/adapter.dylib`. Drop `.dylib`/`.so` files in `~/.config/hom/plugins/` to auto-load at startup. Plugins implement a stable C ABI vtable (`HomPluginVtable`).
+
 ## Supported Harnesses
 
 | Harness | Binary | Tier | Sideband |
@@ -79,6 +85,19 @@ cargo build --release --no-default-features --features vt100-backend
 
 # Run a workflow
 :run workflows/code-review.yaml
+
+# Serve a live web view at http://localhost:4242
+hom --web
+
+# Use a custom web port
+hom --web --web-port 8080
+
+# Spawn a remote pane via SSH
+:spawn claude --remote user@myserver.example.com
+:spawn claude --remote user@myserver.example.com:2222
+
+# Load a plugin adapter
+:load-plugin ~/.config/hom/plugins/mycli.dylib
 ```
 
 ## Commands
@@ -86,6 +105,7 @@ cargo build --release --no-default-features --features vt100-backend
 | Command | Description |
 |---|---|
 | `:spawn <harness> [--model M] [--dir D]` | Open a new pane running the named harness |
+| `:spawn <harness> --remote user@host[:port]` | Spawn a pane on a remote machine via SSH |
 | `:send <text>` | Send text to the focused pane |
 | `:broadcast <text>` | Send text to all active panes |
 | `:pipe <src> <dst>` | Pipe output from one pane into another |
@@ -95,6 +115,7 @@ cargo build --release --no-default-features --features vt100-backend
 | `:focus <n>` | Focus pane number n |
 | `:layout <mode>` | Switch layout (single / hsplit / vsplit / grid / tabbed) |
 | `:kill [n]` | Kill the focused or numbered pane |
+| `:load-plugin <path>` | Load a harness adapter plugin at runtime |
 | `:quit` | Exit HOM cleanly |
 
 **Keyboard shortcuts:** `Tab` — next pane, `Ctrl-Q` — quit, `:` — enter command mode, `F9` — workflow progress, `F10` — cost display.
@@ -135,7 +156,20 @@ Eight built-in templates are included in `workflows/`:
 
 ## Architecture
 
-HOM is a 7-crate Rust workspace. The hardest technical challenge is **TUI-inside-TUI**: each pane runs a real terminal emulator (`libghostty-rs` default, `vt100` opt-in fallback) whose screen state is mapped cell-by-cell into ratatui buffers.
+HOM is a 10-crate Rust workspace. The hardest technical challenge is **TUI-inside-TUI**: each pane runs a real terminal emulator (`libghostty-rs` default, `vt100` opt-in fallback) whose screen state is mapped cell-by-cell into ratatui buffers.
+
+| Crate | Purpose |
+|---|---|
+| `hom-core` | Shared types, traits, config, errors — zero internal deps |
+| `hom-terminal` | Terminal emulation — `GhosttyBackend` (default), `Vt100Backend` (opt-in fallback) |
+| `hom-pty` | `PtyManager` (spawn/read/write/resize/kill) + `AsyncPtyReader` |
+| `hom-adapters` | All 7 harness adapters, `AdapterRegistry`, HTTP/RPC sideband channels |
+| `hom-workflow` | YAML parser, petgraph DAG, executor with retry/timeout/templating |
+| `hom-tui` | App state, pane rendering, input router, command bar, layout engine, status rail |
+| `hom-db` | SQLite via sqlx — workflows, steps, sessions, cost_log |
+| `hom-mcp` | JSON-RPC 2.0 MCP server — 6 tools for external orchestration |
+| `hom-web` | axum 0.8 WebSocket server — Canvas2D live pane viewer |
+| `hom-plugin` | C ABI vtable, plugin loader, plugin adapter — enables runtime harness extensions |
 
 - [`hom-system-design.md`](hom-system-design.md) — full architecture reference
 - [`hom-architecture.html`](hom-architecture.html) — interactive diagram (open in browser)
