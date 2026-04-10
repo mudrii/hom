@@ -16,4 +16,4 @@
 pub mod ffi;
 
 // loader and adapter are created in Task 2
-pub use ffi::{HOM_PLUGIN_ABI_VERSION, HomPluginVtable};
+pub use ffi::{HOM_PLUGIN_ABI_VERSION, HomInputKind, HomPluginVtable};

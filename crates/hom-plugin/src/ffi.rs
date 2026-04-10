@@ -28,6 +28,25 @@ use std::os::raw::c_char;
 /// Increment when any field in `HomPluginVtable` changes position, size, or semantics.
 pub const HOM_PLUGIN_ABI_VERSION: usize = 1;
 
+/// Input command kind for `HomPluginVtable::translate_input`.
+///
+/// `#[repr(u32)]` makes this ABI-compatible with C `uint32_t` — the wire format
+/// is identical to passing a raw `u32`.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomInputKind {
+    /// Send a text prompt to the harness.
+    Prompt = 0,
+    /// Request cancellation of the current operation.
+    Cancel = 1,
+    /// Accept the current suggestion or diff.
+    Accept = 2,
+    /// Reject the current suggestion or diff.
+    Reject = 3,
+    /// Pass raw bytes (text is hex-encoded).
+    Raw = 4,
+}
+
 /// C-compatible vtable exported by every HOM harness adapter plugin.
 ///
 /// All pointers in this struct must be non-null when returned by `hom_plugin_init`.
@@ -58,12 +77,12 @@ pub struct HomPluginVtable {
 
     /// Translate an orchestrator command into PTY bytes.
     ///
-    /// `cmd_type`: 0=Prompt, 1=Cancel, 2=Accept, 3=Reject, 4=Raw.
+    /// `cmd_type`: the kind of command to send (see [`HomInputKind`]).
     /// `text`: null-terminated UTF-8 string.
     ///
     /// Returns heap-allocated hex string (e.g., `"48656c6c6f0a"` = "Hello\n").
     /// Caller must free with `free_str`.
-    pub translate_input: extern "C" fn(cmd_type: u32, text: *const c_char) -> *mut c_char,
+    pub translate_input: extern "C" fn(cmd_type: HomInputKind, text: *const c_char) -> *mut c_char,
 
     /// Parse the terminal screen and return structured events.
     ///
@@ -92,13 +111,21 @@ pub struct HomPluginVtable {
     pub capabilities: extern "C" fn() -> *mut c_char,
 }
 
+// SAFETY: `HomPluginVtable` contains only `usize` and C function pointers.
+// C function pointers have no thread affinity — they are stateless code pointers.
+// Rust automatically derives `Send + Sync` for fn pointers, so this struct
+// is `Send + Sync` without an explicit impl. Plugin authors must ensure their
+// vtable functions are reentrant (no mutable shared state).
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn vtable_size_is_stable() {
-        // 1 usize (abi_version) + 8 fn pointers × size_of::<usize>() each = 9 × 8 = 72 bytes.
+        // 1 usize (abi_version) + 8 fn pointers × size_of::<usize>() each.
+        // On 64-bit: 9 × 8 = 72 bytes. The assertion uses size_of::<usize>() so it is
+        // correct on any target width.
         // If this fails after adding a field, bump HOM_PLUGIN_ABI_VERSION.
         assert_eq!(
             std::mem::size_of::<HomPluginVtable>(),
