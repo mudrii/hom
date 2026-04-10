@@ -361,6 +361,11 @@ hom/
 - 7 tests added (dimensions, plain text, resize, cursor, title, ANSI color, color mapping)
 - `libghostty-vt-sys` build requires Zig network access at first build (`deps.files.ghostty.org`); not validatable in offline environments
 
+**Resolved (April 10, 2026 — P4 Session):**
+- Mouse passthrough — `encode_mouse_event` encodes X10 protocol bytes; `EnableMouseCapture`/`DisableMouseCapture` wired in main.rs setup/teardown; `PaneInput` arm forwards non-focus mouse events to focused PTY
+- Adapter smoke tests — `build_command`/`translate_input` tests added for all 7 adapters; `AdapterRegistry` smoke tests in `lib.rs` (91 tests total in hom-adapters)
+- GhosttyBackend CI — `.github/workflows/ci.yml` `ghostty` job added (self-hosted, zig label); `scripts/seed-zig-cache.sh` documents one-time runner provisioning
+
 **No remaining stubs** — all features are implemented. GhosttyBackend runtime validation requires network access during Zig build.
 
 ## Superpowers Integration

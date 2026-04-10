@@ -570,8 +570,8 @@ Parses and executes orchestrator-level commands:
 | `:broadcast` | `:broadcast "stop"` | Implemented — adapter-translated per-pane |
 | `:run` | `:run code-review --var task="add auth"` | Implemented — parses YAML, validates DAG, spawns WorkflowExecutor via WorkflowBridge |
 | `:layout` | `:layout grid \| hsplit \| vsplit` | Implemented — recomputes areas, resizes all PTYs |
-| `:save` | `:save my-session` | Stub — pending hom-db wiring |
-| `:restore` | `:restore my-session` | Stub — pending hom-db wiring |
+| `:save` | `:save my-session` | Implemented — serialises pane layout + harness config to SQLite via `hom-db::session::save_session` |
+| `:restore` | `:restore my-session` | Implemented — loads session from SQLite and re-spawns panes via `hom-db::session::load_session` |
 | `:help` | `:help` | Implemented — lists all commands |
 | `:quit` | `:quit` | Implemented |
 
@@ -658,7 +658,7 @@ fn render_pane(frame: &mut Frame, area: Rect, pane: &Pane, focused: bool) {
 
 ### 5.1 SQLite Schema
 
-Schema and CRUD functions are implemented in `hom-db`. Session save/restore and cost tracking functions exist but are not yet called from the TUI event loop (`:save`/`:restore` commands show stub messages).
+Schema and CRUD functions are implemented in `hom-db`. Session save/restore and cost tracking are fully wired: `:save`/`:restore` call `hom-db::session` CRUD and `:run` logs cost via `hom-db::cost`.
 
 ```sql
 -- Workflow executions
