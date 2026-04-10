@@ -41,6 +41,7 @@ vt100 = "0.16"  # Fallback terminal emulator
 
 # PTY management
 portable-pty = "0.9"
+ssh2 = "0.9"
 
 # TUI
 ratatui = "0.30"

@@ -6,6 +6,8 @@
 
 pub mod async_reader;
 pub mod manager;
+pub mod remote;
 
 pub use async_reader::AsyncPtyReader;
 pub use manager::PtyManager;
+pub use remote::{RemotePtyManager, SshAuthMethod};

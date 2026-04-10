@@ -3,6 +3,8 @@ name = "hom-pty"
 version.workspace = true
 edition.workspace = true
 description = "PTY management for HOM — spawn, read, write, resize child processes"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 hom-core.workspace = true
@@ -10,3 +12,5 @@ portable-pty.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+ssh2.workspace = true
+dirs.workspace = true
