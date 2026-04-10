@@ -13,7 +13,10 @@
 //!
 //! See `ffi::HomPluginVtable` for the full ABI contract.
 
+pub mod adapter;
 pub mod ffi;
+pub mod loader;
 
-// loader and adapter are created in Task 2
+pub use adapter::PluginAdapter;
 pub use ffi::{HOM_PLUGIN_ABI_VERSION, HomInputKind, HomPluginVtable};
+pub use loader::PluginLoader;

@@ -70,6 +70,10 @@ pub enum HomError {
     #[error("session not found: {0}")]
     SessionNotFound(String),
 
+    // ── Plugin errors ────────────────────────────────────────────────
+    #[error("plugin error: {0}")]
+    PluginError(String),
+
     // ── IO / general ─────────────────────────────────────────────────
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
