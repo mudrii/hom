@@ -72,6 +72,7 @@ pub fn render(frame: &mut Frame, app: &App) {
                     &pane.title,
                     pane.harness_type.display_name(),
                     is_focused,
+                    pane.exited,
                 );
             }
         }

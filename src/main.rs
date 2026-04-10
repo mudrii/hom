@@ -300,11 +300,22 @@ async fn run_app(
             app.total_cost = cost;
         }
 
-        // Check for exited processes
-        let pane_ids: Vec<_> = app.pane_order.clone();
-        for pane_id in pane_ids {
-            if let Ok(Some(_exit_code)) = app.pty_manager.try_wait(pane_id) {
-                // Process exited — could mark pane or clean up
+        // Check for exited processes and handle them
+        let exited_panes = app.handle_exited_panes();
+        for (pane_id, exit_code) in &exited_panes {
+            warn!(pane_id, exit_code, "harness process exited");
+            // Resolve any pending workflow completions for this pane
+            let mut resolved_indices = Vec::new();
+            for (i, pending) in app.pending_completions.iter().enumerate() {
+                if pending.pane_id == *pane_id {
+                    resolved_indices.push(i);
+                }
+            }
+            for i in resolved_indices.into_iter().rev() {
+                let pending = app.pending_completions.remove(i);
+                let _ = pending.reply.send(Err(hom_core::HomError::Other(format!(
+                    "harness process exited with code {exit_code}"
+                ))));
             }
         }
 

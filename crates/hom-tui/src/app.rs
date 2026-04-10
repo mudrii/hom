@@ -28,6 +28,8 @@ pub struct Pane {
     /// Sideband channel for out-of-band communication (e.g. OpenCode HTTP API).
     /// Wrapped in Arc so it can be shared with spawned async tasks.
     pub sideband: Option<Arc<dyn hom_core::SidebandChannel>>,
+    /// Exit code if the process has terminated. None while running.
+    pub exited: Option<u32>,
 }
 
 /// A pending workflow completion — stored while waiting for a harness to finish.
@@ -206,6 +208,7 @@ impl App {
             terminal,
             pty_reader: Some(async_reader),
             sideband,
+            exited: None,
         };
 
         self.panes.insert(pane_id, pane);
@@ -330,6 +333,30 @@ impl App {
             let pending = self.pending_completions.remove(i);
             let _ = pending.reply.send(result);
         }
+    }
+
+    /// Check for processes that have exited and mark their panes.
+    /// Returns a list of (pane_id, exit_code) for newly exited panes.
+    pub fn handle_exited_panes(&mut self) -> Vec<(PaneId, u32)> {
+        let mut newly_exited = Vec::new();
+        let pane_ids: Vec<PaneId> = self.pane_order.clone();
+
+        for pane_id in pane_ids {
+            if let Some(pane) = self.panes.get(&pane_id)
+                && pane.exited.is_some()
+            {
+                continue;
+            }
+
+            if let Ok(Some(exit_code)) = self.pty_manager.try_wait(pane_id) {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.exited = Some(exit_code);
+                }
+                newly_exited.push((pane_id, exit_code));
+            }
+        }
+
+        newly_exited
     }
 
     /// Process PTY output for all panes — feed bytes into terminal emulators.

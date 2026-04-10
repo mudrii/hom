@@ -16,9 +16,19 @@ pub fn render_pane<B: TerminalBackend>(
     title: &str,
     harness_name: &str,
     focused: bool,
+    exited: Option<u32>,
 ) {
-    // Draw pane border
-    let border_style = if focused {
+    // Build display title, appending exit code when the process has terminated
+    let display_title = if let Some(code) = exited {
+        format!(" {title} [{harness_name}] [EXITED: {code}] ")
+    } else {
+        format!(" {title} [{harness_name}] ")
+    };
+
+    // Draw pane border — red when exited, cyan when focused, grey otherwise
+    let border_style = if exited.is_some() {
+        Style::default().fg(Color::Red)
+    } else if focused {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
@@ -29,7 +39,7 @@ pub fn render_pane<B: TerminalBackend>(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(format!(" {title} [{harness_name}] "));
+        .title(display_title);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
