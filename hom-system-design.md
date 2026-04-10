@@ -1022,18 +1022,21 @@ async-trait = "0.1"
 
 ## 11. Future Directions
 
-1. **GhosttyBackend implementation** — uncomment libghostty-vt dependency, install Zig ≥0.15.x, wire real calls behind the `TerminalBackend` trait methods
-2. **Wire session save/restore** — connect `:save`/`:restore` commands to hom-db session CRUD
-3. **Wire cost tracking** — call `log_cost()`/`total_cost()` from adapter/workflow layer
-4. **Implement `parse_screen()`** — per-adapter screen parsing for structured output extraction (only Claude Code has real logic today)
-5. **Integration-test sideband channels** — HTTP for OpenCode, JSON-RPC for pi-mono and Copilot (stub implementations exist)
-6. **Parallel step execution** — refactor WorkflowRuntime to `Arc<dyn>` for JoinSet-based concurrency
-7. **SendAndWait completion detection** — poll `detect_completion()` instead of timeout-based placeholder
-8. **Keybinding config wiring** — apply parsed TOML keybindings to InputRouter
-9. **GPU rendering** — leverage libghostty's GPU pipeline for complex terminal output
-10. **Plugin system for adapters** — when community wants custom harnesses
-11. **Remote pane support** — spawn harnesses on remote machines via SSH
-12. **Web UI** — serve ratatui frames over WebSocket for browser-based access
-13. **MCP integration** — expose HOM itself as an MCP server for IDE integration
-14. **Workflow marketplace** — share and discover workflow templates
-15. **Agent-to-agent protocol** — standardized message format between harnesses (beyond screen scraping)
+**Resolved in Phase 3/4:**
+- ~~Wire session save/restore~~ → `:save`/`:restore` wired to hom-db
+- ~~Wire cost tracking~~ → `log_cost()` from workflow + token events, displayed in status rail
+- ~~Implement `parse_screen()`~~ → all 7 adapters have real implementations
+- ~~Integration-test sideband channels~~ → HTTP sideband tested, RPC implemented
+- ~~Parallel step execution~~ → `Arc<dyn WorkflowRuntime>` + JoinSet
+- ~~SendAndWait completion detection~~ → PendingCompletion polling
+- ~~Keybinding config wiring~~ → KeybindingsConfig applied to InputRouter
+
+**Active future work:**
+1. **GhosttyBackend implementation** — blocked on libghostty-vt + Zig ≥0.15.x
+2. **GPU rendering** — leverage libghostty's pipeline for complex output
+3. **Plugin system for adapters** — WASM or shared library plugins
+4. **Remote pane support** — spawn harnesses on remote machines via SSH
+5. **Web UI** — serve ratatui frames over WebSocket
+6. **MCP integration** — expose HOM as an MCP server
+7. **Workflow marketplace** — share and discover templates
+8. **Agent-to-agent protocol** — standardized message format
