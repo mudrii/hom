@@ -24,6 +24,7 @@ use hom_tui::app::App;
 use hom_tui::input::Action;
 use hom_tui::render::render;
 use hom_tui::workflow_bridge::{WorkflowBridge, WorkflowRequest, WorkflowRequestRx};
+use hom_tui::workflow_progress::WorkflowProgress;
 
 #[derive(Parser)]
 #[command(name = "hom", version, about = "AI Harness Orchestrator TUI")]
@@ -113,7 +114,10 @@ async fn main() -> anyhow::Result<()> {
         let workflow_path = workflow_dir.join(format!("{workflow_name}.yaml"));
         match hom_workflow::WorkflowDef::from_file(&workflow_path) {
             Ok(def) => {
-                app.workflow_status = Some(format!("running: {workflow_name}"));
+                app.workflow_progress = Some(WorkflowProgress::new(
+                    workflow_name.to_string(),
+                    def.steps.iter().map(|s| s.id.clone()).collect(),
+                ));
                 let variables: HashMap<String, String> = cli.vars.iter().cloned().collect();
                 let db = app.db.clone();
                 let bridge_clone = bridge.clone();
@@ -125,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => {
                 warn!(workflow = %workflow_name, error = %e, "failed to load CLI workflow");
-                app.workflow_status = Some(format!("error: {e}"));
+                app.command_bar.last_error = Some(format!("workflow load error: {e}"));
             }
         }
     }
@@ -464,8 +468,10 @@ fn handle_command(
             if workflow_path.exists() {
                 match hom_workflow::parser::WorkflowDef::from_file(&workflow_path) {
                     Ok(def) => {
-                        app.workflow_status =
-                            Some(format!("running: {} ({} steps)", workflow, def.steps.len()));
+                        app.workflow_progress = Some(WorkflowProgress::new(
+                            workflow.clone(),
+                            def.steps.iter().map(|s| s.id.clone()).collect(),
+                        ));
                         info!(
                             workflow = %workflow,
                             steps = def.steps.len(),
@@ -663,6 +669,11 @@ fn handle_workflow_request(
         WorkflowRequest::KillPane { pane_id, reply } => {
             let result = app.kill_pane(pane_id);
             let _ = reply.send(result);
+        }
+        WorkflowRequest::StepUpdate { step_id, status } => {
+            if let Some(ref mut progress) = app.workflow_progress {
+                progress.update_step(&step_id, status);
+            }
         }
     }
 }

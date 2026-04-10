@@ -32,6 +32,10 @@ pub enum WorkflowRequest {
         pane_id: PaneId,
         reply: oneshot::Sender<HomResult<()>>,
     },
+    StepUpdate {
+        step_id: String,
+        status: crate::workflow_progress::StepProgress,
+    },
 }
 
 /// Handle held by the TUI event loop to receive workflow requests.
@@ -103,5 +107,20 @@ impl WorkflowRuntime for WorkflowBridge {
         reply_rx
             .await
             .map_err(|_| HomError::Other("workflow bridge: reply channel dropped".to_string()))?
+    }
+
+    async fn report_step_status(&self, step_id: &str, status: &str) {
+        use crate::workflow_progress::StepProgress;
+        let progress = match status {
+            "running" => StepProgress::Running,
+            "completed" => StepProgress::Completed,
+            "failed" => StepProgress::Failed,
+            "skipped" => StepProgress::Skipped,
+            _ => StepProgress::Pending,
+        };
+        let _ = self.tx.send(WorkflowRequest::StepUpdate {
+            step_id: step_id.to_string(),
+            status: progress,
+        });
     }
 }

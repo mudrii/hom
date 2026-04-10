@@ -24,12 +24,13 @@ pub fn render(frame: &mut Frame, app: &App) {
         .split(frame.area());
 
     // ── Status rail ──────────────────────────────────────────────
+    let workflow_summary = app.workflow_progress.as_ref().map(|p| p.summary());
     render_status_rail(
         frame,
         chunks[0],
         app.panes.len(),
         app.focused_pane,
-        app.workflow_status.as_deref(),
+        workflow_summary.as_deref(),
         app.total_cost,
     );
 

@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 
 use crate::command_bar::CommandBar;
 use crate::input::InputRouter;
+use crate::workflow_progress::WorkflowProgress;
 
 /// A single pane in the TUI — holds a PTY, terminal emulator, and adapter reference.
 pub struct Pane {
@@ -48,7 +49,7 @@ pub struct App {
     pub adapter_registry: AdapterRegistry,
     pub pty_manager: PtyManager,
     pub should_quit: bool,
-    pub workflow_status: Option<String>,
+    pub workflow_progress: Option<WorkflowProgress>,
     /// Optional database handle — opened at startup when available.
     pub db: Option<std::sync::Arc<hom_db::HomDb>>,
     /// Pending completions waiting for harness detect_completion().
@@ -73,7 +74,7 @@ impl App {
             adapter_registry: AdapterRegistry::new(),
             pty_manager: PtyManager::new(),
             should_quit: false,
-            workflow_status: None,
+            workflow_progress: None,
             db: None,
             pending_completions: Vec::new(),
             total_cost: 0.0,

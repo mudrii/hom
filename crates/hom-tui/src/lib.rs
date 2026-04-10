@@ -15,5 +15,6 @@ pub mod pane_render;
 pub mod render;
 pub mod status_rail;
 pub mod workflow_bridge;
+pub mod workflow_progress;
 
 pub use app::App;

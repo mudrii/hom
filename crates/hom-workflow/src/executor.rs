@@ -70,6 +70,14 @@ pub trait WorkflowRuntime: Send + Sync {
 
     /// Kill a pane.
     async fn kill_pane(&self, pane_id: u32) -> HomResult<()>;
+
+    /// Report step status changes to the UI layer.
+    ///
+    /// Default implementation is a no-op. The TUI bridge overrides this
+    /// to push structured progress updates.
+    async fn report_step_status(&self, _step_id: &str, _status: &str) {
+        // default no-op
+    }
 }
 
 /// Callback trait for persisting workflow checkpoints to durable storage.
@@ -214,6 +222,7 @@ impl WorkflowExecutor {
                     && !evaluate_condition(condition, &step_outputs, &step_statuses)
                 {
                     info!(step = %step_id, condition, "condition not met, skipping step");
+                    runtime.report_step_status(step_id, "skipped").await;
                     let result = StepResult {
                         step_id: step_id.clone(),
                         status: StepStatus::Skipped,
@@ -513,6 +522,8 @@ async fn execute_step(runtime: Arc<dyn WorkflowRuntime>, step: RunnableStep) -> 
     let step_start = std::time::Instant::now();
     let mut last_error: Option<String> = None;
 
+    runtime.report_step_status(&step.step_id, "running").await;
+
     for attempt in 1..=step.max_attempts {
         if attempt > 1 {
             let delay = compute_backoff(&step.backoff_kind, attempt);
@@ -538,6 +549,7 @@ async fn execute_step(runtime: Arc<dyn WorkflowRuntime>, step: RunnableStep) -> 
             .await
         {
             Ok(output) => {
+                runtime.report_step_status(&step.step_id, "completed").await;
                 let result = StepResult {
                     step_id: step.step_id.clone(),
                     status: StepStatus::Completed,
@@ -566,6 +578,7 @@ async fn execute_step(runtime: Arc<dyn WorkflowRuntime>, step: RunnableStep) -> 
     // All retries exhausted
     let err_msg = last_error.unwrap_or_else(|| "unknown error".to_string());
     error!(step = %step.step_id, "step failed after {} attempt(s)", step.max_attempts);
+    runtime.report_step_status(&step.step_id, "failed").await;
 
     let result = StepResult {
         step_id: step.step_id.clone(),
