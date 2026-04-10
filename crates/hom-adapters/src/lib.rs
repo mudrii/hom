@@ -103,6 +103,9 @@ impl AdapterRegistry {
             .into_iter()
             .map(|adapter| {
                 let name = adapter.plugin_name();
+                if self.plugins.contains_key(&name) {
+                    warn!(plugin = %name, "overwriting previously loaded plugin with same binary name");
+                }
                 self.plugins.insert(name.clone(), Box::new(adapter));
                 name
             })

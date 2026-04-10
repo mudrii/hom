@@ -311,7 +311,7 @@ async fn run_app(
             match action {
                 Action::Quit => break,
                 Action::WriteToPty(pane_id, bytes) => {
-                    let _ = app.pty_manager.write_to(pane_id, &bytes);
+                    let _ = app.pty_write(pane_id, &bytes);
                 }
                 Action::FocusPane(pane_id) => {
                     app.focused_pane = Some(pane_id);
@@ -535,7 +535,6 @@ fn handle_command(
                     let _ = app.pty_manager.resize(*pane_id, inner_w, inner_h);
                 }
                 if let Some(pane) = app.panes.get_mut(pane_id) {
-                    use hom_core::TerminalBackend;
                     pane.terminal.resize(inner_w, inner_h);
                 }
             }
@@ -562,7 +561,7 @@ fn handle_command(
                 } else {
                     format!("{input}\n").into_bytes()
                 };
-                let _ = app.pty_manager.write_to(id, &bytes);
+                let _ = app.pty_write(id, &bytes);
                 info!(pane_id = id, "sent input to pane");
             } else {
                 app.command_bar.last_error = Some("pane not found".to_string());
@@ -570,7 +569,8 @@ fn handle_command(
         }
         Command::Pipe { source, target } => handle_pipe(app, source, target)?,
         Command::Broadcast(msg) => {
-            for pane_id in &app.pane_order {
+            let pane_ids: Vec<hom_core::PaneId> = app.pane_order.clone();
+            for pane_id in &pane_ids {
                 // Use adapter translation per-pane so each harness gets correctly formatted input
                 let bytes = if let Some(pane) = app.panes.get(pane_id) {
                     let adapter = app.adapter_registry.get(&pane.harness_type);
@@ -582,7 +582,7 @@ fn handle_command(
                 } else {
                     format!("{msg}\n").into_bytes()
                 };
-                let _ = app.pty_manager.write_to(*pane_id, &bytes);
+                let _ = app.pty_write(*pane_id, &bytes);
             }
             info!(
                 pane_count = app.pane_order.len(),
@@ -664,7 +664,7 @@ fn handle_pipe(
             } else {
                 format!("{output}\n").into_bytes()
             };
-            let _ = app.pty_manager.write_to(tgt, &bytes);
+            let _ = app.pty_write(tgt, &bytes);
             info!(source = src, target = tgt, "piped output between panes");
         }
         _ => {
@@ -844,7 +844,7 @@ fn handle_workflow_request(
                             ))
                         })
                         .unwrap_or_else(|| format!("{prompt}\n").into_bytes());
-                    match app.pty_manager.write_to(pane_id, &bytes) {
+                    match app.pty_write(pane_id, &bytes) {
                         Ok(()) => {
                             app.pending_completions
                                 .push(hom_tui::app::PendingCompletion {

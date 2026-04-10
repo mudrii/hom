@@ -269,6 +269,24 @@ impl RemotePtyManager {
     pub fn has_pane(&self, pane_id: PaneId) -> bool {
         self.sessions.contains_key(&pane_id)
     }
+
+    /// Check whether the remote process has exited.
+    ///
+    /// Returns `Ok(Some(code))` when the channel has received EOF from the remote
+    /// side (`channel.eof()` is true). Returns `Ok(None)` while the process is
+    /// still running. The exit status is read from the SSH channel's cached value.
+    pub fn try_wait(&self, pane_id: PaneId) -> HomResult<Option<u32>> {
+        let session = self
+            .sessions
+            .get(&pane_id)
+            .ok_or(HomError::PaneNotFound(pane_id))?;
+        if session.channel.eof() {
+            let code = session.channel.exit_status().map(|c| c as u32).unwrap_or(1);
+            Ok(Some(code))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 impl Default for RemotePtyManager {

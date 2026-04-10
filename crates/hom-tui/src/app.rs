@@ -445,6 +445,17 @@ impl App {
         Ok(())
     }
 
+    /// Write bytes to a pane's PTY, dispatching to the correct manager.
+    ///
+    /// Remote panes (IDs ≥ 1000) are served by `remote_ptys`; local panes by `pty_manager`.
+    pub fn pty_write(&mut self, pane_id: PaneId, bytes: &[u8]) -> HomResult<()> {
+        if self.remote_ptys.has_pane(pane_id) {
+            self.remote_ptys.write_to(pane_id, bytes)
+        } else {
+            self.pty_manager.write_to(pane_id, bytes)
+        }
+    }
+
     /// Focus the next pane in order.
     pub fn focus_next(&mut self) {
         if self.pane_order.is_empty() {
@@ -563,7 +574,13 @@ impl App {
                 continue;
             }
 
-            if let Ok(Some(exit_code)) = self.pty_manager.try_wait(pane_id) {
+            let maybe_exit = if self.remote_ptys.has_pane(pane_id) {
+                self.remote_ptys.try_wait(pane_id).ok().flatten()
+            } else {
+                self.pty_manager.try_wait(pane_id).ok().flatten()
+            };
+
+            if let Some(exit_code) = maybe_exit {
                 if let Some(pane) = self.panes.get_mut(&pane_id) {
                     pane.exited = Some(exit_code);
                 }
@@ -896,15 +913,20 @@ impl App {
             match input.pane_id.parse::<PaneId>() {
                 Ok(id) => {
                     if let Some(pane) = self.panes.get(&id) {
-                        let adapter = self.adapter_registry.get(&pane.harness_type);
-                        let bytes = adapter
-                            .map(|a| {
-                                a.translate_input(&hom_core::OrchestratorCommand::Prompt(
-                                    input.text.clone(),
-                                ))
-                            })
-                            .unwrap_or_else(|| format!("{}\n", input.text).into_bytes());
-                        if let Err(e) = self.pty_manager.write_to(id, &bytes) {
+                        // Plugin panes use the plugin adapter for input translation.
+                        let cmd = hom_core::OrchestratorCommand::Prompt(input.text.clone());
+                        let bytes = if let Some(ref plugin_name) = pane.plugin_name {
+                            self.adapter_registry
+                                .get_plugin(plugin_name)
+                                .map(|a| a.translate_input(&cmd))
+                                .unwrap_or_else(|| format!("{}\n", input.text).into_bytes())
+                        } else {
+                            self.adapter_registry
+                                .get(&pane.harness_type)
+                                .map(|a| a.translate_input(&cmd))
+                                .unwrap_or_else(|| format!("{}\n", input.text).into_bytes())
+                        };
+                        if let Err(e) = self.pty_write(id, &bytes) {
                             tracing::warn!(pane_id = %id, "web input: PTY write failed: {e}");
                         }
                     }
