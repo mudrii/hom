@@ -326,6 +326,50 @@ pub fn encode_key_event(key: &KeyEvent) -> Vec<u8> {
     }
 }
 
+/// Encode a mouse event into X10 mouse protocol bytes for a PTY.
+///
+/// Format: `ESC [ M <Cb> <Cx> <Cy>` (6 bytes)
+/// - `Cb` = button_code | modifier_flags, then + 32
+/// - `Cx` = (col + 1) + 32 — 1-based column with +32 offset
+/// - `Cy` = (row + 1) + 32 — 1-based row with +32 offset
+///
+/// `col`/`row` are 0-based pane-relative coordinates.
+/// Returns an empty Vec for `Moved` and `Drag` events — those are not forwarded.
+pub fn encode_mouse_event(
+    kind: &MouseEventKind,
+    col: u16,
+    row: u16,
+    modifiers: KeyModifiers,
+) -> Vec<u8> {
+    let button_code: u8 = match kind {
+        MouseEventKind::Down(MouseButton::Left) => 0,
+        MouseEventKind::Down(MouseButton::Middle) => 1,
+        MouseEventKind::Down(MouseButton::Right) => 2,
+        MouseEventKind::Up(_) => 3,
+        MouseEventKind::ScrollUp => 64,
+        MouseEventKind::ScrollDown => 65,
+        MouseEventKind::Moved | MouseEventKind::Drag(_) => return Vec::new(),
+        _ => return Vec::new(),
+    };
+
+    let mut cb = button_code + 32;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        cb |= 4;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        cb |= 8;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        cb |= 16;
+    }
+
+    // Coordinates are 1-based; clamp to 1–223 so the encoded byte stays in 33–255.
+    let cx = ((col as u32 + 1).min(223) as u8) + 32;
+    let cy = ((row as u32 + 1).min(223) as u8) + 32;
+
+    vec![0x1b, b'[', b'M', cb, cx, cy]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +462,87 @@ mod tests {
     fn test_encode_enter() {
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(encode_key_event(&key), vec![b'\r']);
+    }
+
+    // ── encode_mouse_event ────────────────────────────────────────────
+
+    #[test]
+    fn test_encode_mouse_left_click_origin() {
+        // col=0, row=0, no mods → Cb=32, Cx=33, Cy=33
+        let bytes = encode_mouse_event(
+            &MouseEventKind::Down(MouseButton::Left),
+            0,
+            0,
+            KeyModifiers::empty(),
+        );
+        assert_eq!(bytes, vec![0x1b, b'[', b'M', 32, 33, 33]);
+    }
+
+    #[test]
+    fn test_encode_mouse_scroll_up() {
+        // ScrollUp at col=4, row=2, no mods → Cb=64+32=96, Cx=4+33=37, Cy=2+33=35
+        let bytes = encode_mouse_event(
+            &MouseEventKind::ScrollUp,
+            4,
+            2,
+            KeyModifiers::empty(),
+        );
+        assert_eq!(bytes, vec![0x1b, b'[', b'M', 96, 37, 35]);
+    }
+
+    #[test]
+    fn test_encode_mouse_scroll_down() {
+        // ScrollDown at col=0, row=0 → Cb=65+32=97
+        let bytes = encode_mouse_event(
+            &MouseEventKind::ScrollDown,
+            0,
+            0,
+            KeyModifiers::empty(),
+        );
+        assert_eq!(bytes, vec![0x1b, b'[', b'M', 97, 33, 33]);
+    }
+
+    #[test]
+    fn test_encode_mouse_release() {
+        // Up(Left) → button code 3, Cb=3+32=35
+        let bytes = encode_mouse_event(
+            &MouseEventKind::Up(MouseButton::Left),
+            0,
+            0,
+            KeyModifiers::empty(),
+        );
+        assert_eq!(bytes, vec![0x1b, b'[', b'M', 35, 33, 33]);
+    }
+
+    #[test]
+    fn test_encode_mouse_ctrl_modifier() {
+        // Left+Ctrl → Cb = 0 + 32 | 16 = 48
+        let bytes = encode_mouse_event(
+            &MouseEventKind::Down(MouseButton::Left),
+            0,
+            0,
+            KeyModifiers::CONTROL,
+        );
+        assert_eq!(bytes, vec![0x1b, b'[', b'M', 48, 33, 33]);
+    }
+
+    #[test]
+    fn test_encode_mouse_moved_returns_empty() {
+        let bytes =
+            encode_mouse_event(&MouseEventKind::Moved, 5, 5, KeyModifiers::empty());
+        assert!(bytes.is_empty(), "Moved events must not be forwarded");
+    }
+
+    #[test]
+    fn test_encode_mouse_right_click() {
+        // Right → button code 2, Cb=2+32=34
+        let bytes = encode_mouse_event(
+            &MouseEventKind::Down(MouseButton::Right),
+            2,
+            3,
+            KeyModifiers::empty(),
+        );
+        // Cx=(2+1)+32=35, Cy=(3+1)+32=36
+        assert_eq!(bytes, vec![0x1b, b'[', b'M', 34, 35, 36]);
     }
 }
