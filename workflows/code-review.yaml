@@ -1,0 +1,48 @@
+# Workflow: Code Review Pipeline
+# Usage: :run code-review --var task="add authentication"
+#
+# Flow: Plan (Claude) → Implement (Codex) → Validate (Copilot) → Security Review (Claude)
+
+name: code-review
+description: Plan with Claude, implement with Codex, validate with Copilot, review with Claude
+
+variables:
+  task: ""  # Provided at runtime
+
+steps:
+  - id: plan
+    harness: claude-code
+    model: opus
+    prompt: |
+      Review this codebase and create a detailed implementation plan for:
+      {{ task }}
+      Output a numbered list of steps with file paths and changes needed.
+    timeout: 300s
+
+  - id: implement
+    harness: codex
+    model: codex-5.4
+    prompt: |
+      Execute the following implementation plan step by step:
+      {{ steps.plan.output }}
+    depends_on: [plan]
+    timeout: 600s
+
+  - id: validate
+    harness: copilot
+    prompt: |
+      Review and test the changes made. Run all tests.
+      Report any failures or issues found.
+    depends_on: [implement]
+    timeout: 300s
+
+  - id: security-review
+    harness: claude-code
+    model: opus
+    prompt: |
+      Perform a security review of all changes made.
+      Check for: injection vulnerabilities, auth issues, data exposure.
+      Test results: {{ steps.validate.output }}
+    depends_on: [validate]
+    timeout: 300s
+    condition: 'steps.validate.output contains "PASS"'

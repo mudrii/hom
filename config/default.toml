@@ -1,0 +1,48 @@
+# HOM default configuration
+# Copy to ~/.config/hom/config.toml and customize.
+
+[general]
+default_layout = "hsplit"
+max_scrollback = 10000
+render_fps = 30
+max_panes = 8
+
+[keybindings]
+toggle_command_bar = "ctrl-`"
+next_pane = "ctrl-tab"
+prev_pane = "ctrl-shift-tab"
+kill_pane = "ctrl-w"
+
+# ── Harness definitions ───────────────────────────────────────────────
+# Each [harnesses.<name>] section configures a harness binary.
+# Override 'command' if your binary is at a non-standard path.
+
+[harnesses.claude-code]
+command = "claude"
+default_model = "opus"
+
+[harnesses.codex]
+command = "codex"
+default_model = "codex-5.4"
+
+[harnesses.pi-mono]
+command = "pi"
+default_model = "minimax-2.7"
+
+[harnesses.copilot]
+command = "copilot"
+default_model = "sonnet-4.5"
+
+[harnesses.gemini]
+command = "gemini"
+default_model = "gemini-2.0-flash"
+
+[harnesses.kimi]
+command = "kimi"
+default_model = "kimi-2.5"
+
+[harnesses.opencode]
+command = "opencode"
+default_model = "anthropic/claude-sonnet-4-5"
+sideband = "http"
+sideband_url = "http://localhost:4096"

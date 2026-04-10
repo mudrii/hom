@@ -1,0 +1,154 @@
+---
+name: hom-terminal-integration
+description: Use when working on terminal emulation, the TerminalBackend trait, libghostty integration, or PTY management
+---
+
+# HOM Terminal Integration
+
+## When to Use
+
+Invoke this skill when:
+- Implementing or modifying `GhosttyBackend` in `crates/hom-terminal/src/ghostty.rs`
+- Modifying `Vt100Backend` in `crates/hom-terminal/src/fallback_vt100.rs`
+- Changing the `TerminalBackend` trait in `crates/hom-core/src/traits.rs`
+- Working on PTY management in `crates/hom-pty/src/manager.rs`
+- Modifying the async PTY reader in `crates/hom-pty/src/async_reader.rs`
+- Debugging terminal rendering issues (wrong colors, missing characters, cursor position)
+- Enabling the `ghostty-backend` feature flag
+
+## Architecture: TUI-inside-TUI
+
+This is the hardest part of HOM. Each pane runs a REAL terminal emulator:
+
+```
+Harness Process (e.g., claude)
+    ↓ writes ANSI escape sequences to stdout
+PTY slave → PTY master
+    ↓ raw bytes
+AsyncPtyReader (tokio channel)
+    ↓ Vec<u8> chunks
+terminal.process(bytes)    ← TerminalBackend implementation
+    ↓ updates internal screen state
+terminal.screen_snapshot() → ScreenSnapshot { rows: Vec<Vec<Cell>> }
+    ↓ cell-by-cell mapping
+pane_render.rs → ratatui Buffer
+    ↓
+ratatui renders to real terminal
+```
+
+Every byte from the harness flows through this pipeline. A bug anywhere means garbled output.
+
+## The TerminalBackend Trait
+
+Defined in `crates/hom-core/src/traits.rs`. Any terminal emulator must implement:
+
+| Method | What it does | Failure mode |
+|--------|-------------|--------------|
+| `new(cols, rows, scrollback)` | Create terminal state | — |
+| `process(bytes)` | Feed PTY output into VT state machine | Garbled screen |
+| `resize(cols, rows)` | Update terminal dimensions | Content clipped or wrapped wrong |
+| `screen_snapshot()` | Return all cells with colors and attributes | Wrong rendering |
+| `cursor()` | Return cursor position and visibility | Cursor in wrong place |
+| `title()` | Return window title set by child process | Cosmetic only |
+
+## libghostty-rs Integration (Feature: `ghostty-backend`)
+
+**Current status:** Stubbed in `ghostty.rs`. The feature flag exists but the implementation is placeholder.
+
+**To enable:**
+
+1. Install Zig ≥0.15.x: `curl -L https://ziglang.org/download/0.15.0/zig-linux-x86_64-0.15.0.tar.xz | tar -xJ`
+2. Uncomment `libghostty-vt` in workspace `Cargo.toml`
+3. Pin to a specific commit: `rev = "<commit-hash>"`
+4. Uncomment the feature flag in `crates/hom-terminal/Cargo.toml`
+5. Implement `GhosttyBackend`:
+   - Map `libghostty_vt::Terminal` screen cells to our `Cell` type
+   - Map ghostty colors to `TermColor`
+   - Map ghostty attributes to `CellAttributes`
+
+**Critical risk:** libghostty-rs is v0.1.1, pre-1.0. Pin commits. The API WILL change.
+
+## vt100 Backend (Default)
+
+The working fallback in `fallback_vt100.rs`. Uses the `vt100` crate (v0.16).
+
+**Known limitations:**
+- No Kitty graphics protocol
+- No sixel support
+- `title()` always returns `None` (vt100 0.16 doesn't expose it)
+- Resize uses `screen_mut().set_size()` (not `parser.set_size()`)
+- No dim attribute detection
+
+**These limitations are acceptable** for the current implementation. Most harness TUIs use basic text, colors, and cursor positioning.
+
+## Color Mapping
+
+`crates/hom-terminal/src/color_map.rs` maps `TermColor` → `ratatui::style::Color`.
+
+When adding a new backend, you must map its color representation to `TermColor`. The 16 named colors (Black through BrightWhite) plus Indexed(0-255) and Rgb(r,g,b) must all be handled.
+
+## PTY Management
+
+`crates/hom-pty/src/manager.rs` uses `portable-pty` to:
+- Open a PTY pair (master + slave)
+- Spawn the harness command on the slave
+- Read from master (→ terminal emulator)
+- Write to master (← user input / orchestrator commands)
+- Resize the PTY when the pane resizes
+
+**Critical timing issue:** After spawning, the harness needs time to initialize before accepting input. Don't send prompts immediately — wait for `detect_completion() == WaitingForInput`.
+
+## Testing Terminal Emulation
+
+```rust
+#[test]
+fn test_process_simple_text() {
+    let mut term = Vt100Backend::new(80, 24, 0);
+    term.process(b"Hello, World!");
+    let snap = term.screen_snapshot();
+    let first_row: String = snap.rows[0].iter().map(|c| c.character).collect();
+    assert!(first_row.starts_with("Hello, World!"));
+}
+
+#[test]
+fn test_process_color_escape() {
+    let mut term = Vt100Backend::new(80, 24, 0);
+    term.process(b"\x1b[31mRed text\x1b[0m");
+    let snap = term.screen_snapshot();
+    assert!(matches!(snap.rows[0][0].fg, TermColor::Red));
+}
+
+#[test]
+fn test_cursor_movement() {
+    let mut term = Vt100Backend::new(80, 24, 0);
+    term.process(b"Line 1\nLine 2");
+    let cursor = term.cursor();
+    assert_eq!(cursor.row, 1);
+}
+
+#[test]
+fn test_resize() {
+    let mut term = Vt100Backend::new(80, 24, 0);
+    term.resize(40, 12);
+    let snap = term.screen_snapshot();
+    assert_eq!(snap.cols, 40);
+    assert_eq!(snap.num_rows, 12);
+}
+```
+
+## Red Flags — STOP and Rethink
+
+- **Modifying TerminalBackend trait** — This affects BOTH backends. Test both paths.
+- **Ignoring the feature flag boundary** — Code guarded by `#[cfg(feature = "ghostty-backend")]` must never reference `vt100` and vice versa.
+- **Blocking reads on PTY** — Always use `AsyncPtyReader`. Blocking the tokio runtime freezes the entire TUI.
+- **Skipping color mapping for a cell attribute** — Missing bold/italic mapping makes harness TUIs look wrong.
+
+## Checklist Before Committing
+
+- [ ] `cargo check` passes with default features (vt100)
+- [ ] `cargo check --features ghostty-backend --no-default-features` passes (if ghostty available)
+- [ ] Terminal emulation tests pass: `cargo test -p hom-terminal`
+- [ ] PTY tests pass: `cargo test -p hom-pty`
+- [ ] Color mapping covers all `TermColor` variants
+- [ ] No blocking I/O on the tokio runtime
+- [ ] Feature flag boundaries are clean (no cross-contamination)

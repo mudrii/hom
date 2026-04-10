@@ -1,0 +1,15 @@
+[package]
+name = "hom-adapters"
+version.workspace = true
+edition.workspace = true
+description = "Harness adapter implementations for all 7 supported AI coding agents"
+
+[dependencies]
+hom-core.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+tokio.workspace = true

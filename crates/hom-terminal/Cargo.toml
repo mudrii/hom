@@ -1,0 +1,19 @@
+[package]
+name = "hom-terminal"
+version.workspace = true
+edition.workspace = true
+description = "Terminal emulation layer for HOM (vt100 default, libghostty-rs planned)"
+
+[features]
+default = ["vt100-backend"]
+# ghostty-backend is a real feature flag but currently empty — the libghostty-vt
+# dependency is not yet published. When it is available (requires Zig ≥0.15.x),
+# change this to: ghostty-backend = ["dep:libghostty-vt"]
+ghostty-backend = []
+vt100-backend = ["dep:vt100"]
+
+[dependencies]
+hom-core.workspace = true
+ratatui.workspace = true
+# libghostty-vt = { workspace = true, optional = true }
+vt100 = { workspace = true, optional = true }

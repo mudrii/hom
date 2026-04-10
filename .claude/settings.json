@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check*)",
+      "Bash(cargo test*)",
+      "Bash(cargo clippy*)",
+      "Bash(cargo fmt*)",
+      "Bash(cargo build*)",
+      "Bash(cargo run*)",
+      "Read(*)",
+      "Write(crates/**)",
+      "Write(src/**)",
+      "Write(workflows/**)",
+      "Write(config/**)",
+      "Write(skills/**)",
+      "Write(docs/**)",
+      "Write(CLAUDE.md)",
+      "Edit(crates/**)",
+      "Edit(src/**)",
+      "Edit(workflows/**)",
+      "Edit(config/**)",
+      "Edit(Cargo.toml)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)*",
+      "Bash(git push --force*)"
+    ]
+  }
+}

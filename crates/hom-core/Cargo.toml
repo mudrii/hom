@@ -1,0 +1,15 @@
+[package]
+name = "hom-core"
+version.workspace = true
+edition.workspace = true
+description = "Core types, traits, and error definitions for HOM orchestrator"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+toml.workspace = true
+dirs.workspace = true

@@ -1,0 +1,47 @@
+# Workflow: Plan → Execute → Validate
+# Usage: :run plan-execute-validate --var task="refactor the API layer"
+#
+# A general-purpose three-step workflow that works with any combination of harnesses.
+
+name: plan-execute-validate
+description: Plan a task, execute it, then validate the results
+
+variables:
+  task: ""
+  planner: "claude-code"
+  planner_model: "opus"
+  executor: "codex"
+  executor_model: "codex-5.4"
+  validator: "copilot"
+
+steps:
+  - id: plan
+    harness: "{{ planner }}"
+    model: "{{ planner_model }}"
+    prompt: |
+      Analyze the codebase and create a detailed plan for:
+      {{ task }}
+      Be specific about which files to change and what changes to make.
+    timeout: 300s
+
+  - id: execute
+    harness: "{{ executor }}"
+    model: "{{ executor_model }}"
+    prompt: |
+      Implement the following plan:
+      {{ steps.plan.output }}
+    depends_on: [plan]
+    timeout: 600s
+    retry:
+      max_attempts: 2
+      backoff: exponential
+
+  - id: validate
+    harness: "{{ validator }}"
+    prompt: |
+      Validate the changes that were just made:
+      1. Run all tests
+      2. Check for regressions
+      3. Verify the original task was completed: {{ task }}
+    depends_on: [execute]
+    timeout: 300s

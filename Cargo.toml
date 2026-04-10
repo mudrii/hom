@@ -1,0 +1,103 @@
+[workspace]
+members = [
+    "crates/hom-core",
+    "crates/hom-terminal",
+    "crates/hom-pty",
+    "crates/hom-adapters",
+    "crates/hom-workflow",
+    "crates/hom-tui",
+    "crates/hom-db",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["HOM Contributors"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Internal crates
+hom-core = { path = "crates/hom-core" }
+hom-terminal = { path = "crates/hom-terminal" }
+hom-pty = { path = "crates/hom-pty" }
+hom-adapters = { path = "crates/hom-adapters" }
+hom-workflow = { path = "crates/hom-workflow" }
+hom-tui = { path = "crates/hom-tui" }
+hom-db = { path = "crates/hom-db" }
+
+# Terminal emulation — pin to specific commit for stability
+# libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "PIN_ME" }
+vt100 = "0.16"  # Fallback terminal emulator
+
+# PTY management
+portable-pty = "0.9"
+
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Workflow engine
+petgraph = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml_ng = "0.10"
+serde_json = "1.0"
+minijinja = "2"
+backoff = { version = "0.4", features = ["tokio"] }
+
+# Storage
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# HTTP client (OpenCode sideband) — use rustls to avoid native OpenSSL dep
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+# Configuration
+toml = "1.1"
+dirs = "6.0"
+
+# Utilities
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "2.0"
+clap = { version = "4.0", features = ["derive"] }
+async-trait = "0.1"
+
+# The main binary
+[package]
+name = "hom"
+version.workspace = true
+edition.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "terminal_render"
+harness = false
+
+[dependencies]
+hom-core.workspace = true
+hom-terminal.workspace = true
+hom-pty.workspace = true
+hom-adapters.workspace = true
+hom-workflow.workspace = true
+hom-tui.workspace = true
+hom-db.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+toml.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

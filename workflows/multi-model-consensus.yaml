@@ -1,0 +1,54 @@
+# Workflow: Multi-Model Consensus
+# Usage: :run multi-model-consensus --var question="should we use microservices or monolith?"
+#
+# Ask the same question to multiple AI models and synthesize a consensus.
+
+name: multi-model-consensus
+description: Get independent opinions from multiple AI models and synthesize
+
+variables:
+  question: ""
+
+steps:
+  - id: opinion-claude
+    harness: claude-code
+    model: opus
+    prompt: |
+      As a senior software architect, give your analysis of:
+      {{ question }}
+      Provide pros, cons, and your recommendation.
+    timeout: 300s
+
+  - id: opinion-codex
+    harness: codex
+    model: codex-5.4
+    prompt: |
+      As a senior software architect, give your analysis of:
+      {{ question }}
+      Provide pros, cons, and your recommendation.
+    timeout: 300s
+
+  - id: opinion-gemini
+    harness: gemini
+    prompt: |
+      As a senior software architect, give your analysis of:
+      {{ question }}
+      Provide pros, cons, and your recommendation.
+    timeout: 300s
+
+  - id: synthesize
+    harness: claude-code
+    model: opus
+    prompt: |
+      Three different AI models analyzed this question: {{ question }}
+
+      Model 1 (Claude): {{ steps.opinion-claude.output }}
+
+      Model 2 (Codex): {{ steps.opinion-codex.output }}
+
+      Model 3 (Gemini): {{ steps.opinion-gemini.output }}
+
+      Synthesize these opinions into a consensus recommendation.
+      Note where all models agree and where they diverge.
+    depends_on: [opinion-claude, opinion-codex, opinion-gemini]
+    timeout: 300s
