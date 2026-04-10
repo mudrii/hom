@@ -1,5 +1,5 @@
-use std::io::{BufRead, Write};
 use serde_json::json;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 use hom_core::types::McpRequest;
@@ -22,16 +22,17 @@ impl McpServer {
     }
 
     /// Run the server. Blocks until stdin closes.
-    /// Call via `tokio::task::spawn_blocking` or in a dedicated thread.
+    /// Spawned via `tokio::spawn` — uses async stdin/stdout to stay `Send`.
     pub async fn run(self) {
-        let stdin = std::io::stdin();
-        let stdout = std::io::stdout();
-        let mut out = std::io::BufWriter::new(stdout.lock());
+        let stdin = tokio::io::stdin();
+        let mut lines = BufReader::new(stdin).lines();
+        let mut stdout = tokio::io::stdout();
 
-        for line in stdin.lock().lines() {
-            let line = match line {
-                Ok(l) if l.is_empty() => continue,
-                Ok(l) => l,
+        loop {
+            let line = match lines.next_line().await {
+                Ok(Some(l)) if l.is_empty() => continue,
+                Ok(Some(l)) => l,
+                Ok(None) => break,
                 Err(e) => {
                     error!("MCP stdin read error: {e}");
                     break;
@@ -45,11 +46,24 @@ impl McpServer {
                 Ok(req) => self.dispatch(req).await,
             };
 
-            let json_line = serde_json::to_string(&response).unwrap_or_default();
+            let json_line = match serde_json::to_string(&response) {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("MCP serialization error: {e}");
+                    continue;
+                }
+            };
             debug!("MCP → {json_line}");
 
-            if writeln!(out, "{json_line}").is_err() || out.flush().is_err() {
-                error!("MCP stdout write error");
+            let write_result = async {
+                stdout.write_all(json_line.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await
+            }
+            .await;
+
+            if let Err(e) = write_result {
+                error!("MCP stdout write error: {e}");
                 break;
             }
         }

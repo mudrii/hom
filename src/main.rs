@@ -20,6 +20,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use hom_core::{HarnessType, HomConfig, LayoutKind, TerminalBackend};
+use hom_mcp::McpServer;
 use hom_tui::app::App;
 use hom_tui::input::Action;
 use hom_tui::render::render;
@@ -44,6 +45,11 @@ struct Cli {
     /// Run without database (disables session save, cost tracking, workflow checkpoints)
     #[arg(long)]
     no_db: bool,
+
+    /// Run as an MCP server (JSON-RPC 2.0 over stdin/stdout).
+    /// The TUI renders normally; MCP tool calls are dispatched to it via channel.
+    #[arg(long)]
+    mcp: bool,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
@@ -89,6 +95,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Create app
     let mut app = App::new(config);
+
+    // Start MCP server if --mcp flag is set.
+    // The server reads JSON-RPC 2.0 from stdin and writes responses to stdout.
+    // It communicates with the TUI app via an mpsc channel.
+    if cli.mcp {
+        let (mcp_tx, mcp_rx) = tokio::sync::mpsc::channel(64);
+        app.mcp_rx = Some(mcp_rx);
+        tokio::spawn(async move {
+            McpServer::new(mcp_tx).run().await;
+        });
+        tracing::info!("MCP server started (JSON-RPC 2.0 on stdin/stdout)");
+    }
 
     // Validate keybinding strings — warn the user about any invalid entries.
     // Invalid entries silently fall back to defaults, which is confusing.
@@ -208,6 +226,9 @@ async fn run_app(
         while let Ok(req) = workflow_rx.try_recv() {
             handle_workflow_request(app, req, terminal.size()?.into());
         }
+
+        // Dispatch pending MCP requests (up to 16 per tick)
+        app.handle_mcp_requests();
 
         // Poll for events
         if event::poll(tick_rate)? {

@@ -8,9 +8,10 @@ use hom_adapters::AdapterRegistry;
 use hom_core::{
     HarnessConfig, HarnessType, HomConfig, HomResult, LayoutKind, PaneId, TerminalBackend,
 };
+use hom_core::types::{McpCommand, McpRequest, McpResponse, PaneSummary};
 use hom_pty::{AsyncPtyReader, PtyManager};
 use hom_terminal::ActiveBackend;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
 use crate::command_bar::CommandBar;
@@ -59,6 +60,8 @@ pub struct App {
     pub pending_completions: Vec<PendingCompletion>,
     /// Running total cost in USD, polled from the database.
     pub total_cost: f64,
+    /// Receives MCP requests from the McpServer task. None when not in MCP mode.
+    pub mcp_rx: Option<mpsc::Receiver<McpRequest>>,
 }
 
 impl App {
@@ -81,6 +84,7 @@ impl App {
             db: None,
             pending_completions: Vec::new(),
             total_cost: 0.0,
+            mcp_rx: None,
         }
     }
 
@@ -413,6 +417,154 @@ impl App {
             .collect();
         let panes_json = serde_json::to_string(&pane_configs).unwrap_or_default();
         (layout_json, panes_json)
+    }
+
+    /// Process up to 16 pending MCP requests per tick to avoid starving the render loop.
+    pub fn handle_mcp_requests(&mut self) {
+        // Take the receiver out of self so we can call &mut self methods without
+        // holding a simultaneous borrow on self.mcp_rx.
+        let mut rx = match self.mcp_rx.take() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let mut pending: Vec<McpRequest> = Vec::with_capacity(16);
+        for _ in 0..16 {
+            match rx.try_recv() {
+                Ok(req) => pending.push(req),
+                Err(_) => break,
+            }
+        }
+
+        // Put the receiver back before processing so callers can re-enter.
+        self.mcp_rx = Some(rx);
+
+        for McpRequest { command, reply } in pending {
+            let response = self.execute_mcp_command(command);
+            let _ = reply.send(response);
+        }
+    }
+
+    fn execute_mcp_command(&mut self, command: McpCommand) -> McpResponse {
+        match command {
+            McpCommand::ListPanes => {
+                let panes = self
+                    .panes
+                    .iter()
+                    .map(|(id, pane)| PaneSummary {
+                        pane_id: id.to_string(),
+                        harness: pane.harness_type.to_string(),
+                        status: if pane.exited.is_some() {
+                            "exited".into()
+                        } else {
+                            "running".into()
+                        },
+                    })
+                    .collect();
+                McpResponse::ListPanes { panes }
+            }
+            McpCommand::SpawnPane { harness, model } => {
+                match HarnessType::from_str_loose(&harness) {
+                    Some(harness_type) => {
+                        // Use a modest default size; actual resize happens on first render.
+                        match self.spawn_pane(harness_type, model, 80, 24) {
+                            Ok(pane_id) => McpResponse::SpawnPane {
+                                pane_id: pane_id.to_string(),
+                            },
+                            Err(e) => McpResponse::Error {
+                                error: e.to_string(),
+                            },
+                        }
+                    }
+                    None => McpResponse::Error {
+                        error: format!("unknown harness: {harness}"),
+                    },
+                }
+            }
+            McpCommand::SendToPane { pane_id, text } => {
+                match pane_id.parse::<PaneId>() {
+                    Ok(id) => {
+                        if let Some(pane) = self.panes.get(&id) {
+                            let adapter = self.adapter_registry.get(&pane.harness_type);
+                            let bytes = adapter
+                                .map(|a| {
+                                    a.translate_input(&hom_core::OrchestratorCommand::Prompt(
+                                        text.clone(),
+                                    ))
+                                })
+                                .unwrap_or_else(|| format!("{text}\n").into_bytes());
+                            match self.pty_manager.write_to(id, &bytes) {
+                                Ok(()) => McpResponse::SendToPane { ok: true },
+                                Err(e) => McpResponse::Error {
+                                    error: e.to_string(),
+                                },
+                            }
+                        } else {
+                            McpResponse::Error {
+                                error: format!("pane not found: {pane_id}"),
+                            }
+                        }
+                    }
+                    Err(_) => McpResponse::Error {
+                        error: format!("invalid pane_id: {pane_id}"),
+                    },
+                }
+            }
+            McpCommand::RunWorkflow { path, vars } => {
+                // The workflow executor lives in main.rs (handle_run). We cannot call it
+                // directly from App without pulling in the WorkflowBridge dependency.
+                // Instead we return an error directing the caller to use :run via the
+                // command bar, which is the correct orchestration path.
+                // A future refactor can move the bridge into App.
+                let _ = (path, vars);
+                McpResponse::Error {
+                    error: "run_workflow via MCP is not yet wired; use :run in the TUI command bar".into(),
+                }
+            }
+            McpCommand::GetPaneOutput { pane_id, lines } => {
+                match pane_id.parse::<PaneId>() {
+                    Ok(id) => {
+                        if let Some(pane) = self.panes.get(&id) {
+                            let snapshot = pane.terminal.screen_snapshot();
+                            let start = snapshot.rows.len().saturating_sub(lines);
+                            let output_lines: Vec<String> = snapshot.rows[start..]
+                                .iter()
+                                .map(|row| {
+                                    row.iter()
+                                        .map(|c| c.character)
+                                        .collect::<String>()
+                                        .trim_end()
+                                        .to_string()
+                                })
+                                .collect();
+                            McpResponse::GetPaneOutput {
+                                lines: output_lines,
+                            }
+                        } else {
+                            McpResponse::Error {
+                                error: format!("pane not found: {pane_id}"),
+                            }
+                        }
+                    }
+                    Err(_) => McpResponse::Error {
+                        error: format!("invalid pane_id: {pane_id}"),
+                    },
+                }
+            }
+            McpCommand::KillPane { pane_id } => {
+                match pane_id.parse::<PaneId>() {
+                    Ok(id) => match self.kill_pane(id) {
+                        Ok(()) => McpResponse::KillPane { ok: true },
+                        Err(e) => McpResponse::Error {
+                            error: e.to_string(),
+                        },
+                    },
+                    Err(_) => McpResponse::Error {
+                        error: format!("invalid pane_id: {pane_id}"),
+                    },
+                }
+            }
+        }
     }
 
     /// Clean shutdown: kill all PTY processes and drain pending completions.
