@@ -51,6 +51,14 @@ struct Cli {
     #[arg(long)]
     mcp: bool,
 
+    /// Serve a live browser view at http://localhost:<web-port>
+    #[arg(long)]
+    web: bool,
+
+    /// Port for the web viewer (default 4242)
+    #[arg(long, default_value_t = 4242)]
+    web_port: u16,
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -106,6 +114,17 @@ async fn main() -> anyhow::Result<()> {
             McpServer::new(mcp_tx).run().await;
         });
         tracing::info!("MCP server started (JSON-RPC 2.0 on stdin/stdout)");
+    }
+
+    // Start web viewer if --web flag is set.
+    // Serves a Canvas2D live view of all panes at http://localhost:<web-port>.
+    if cli.web {
+        let (web_tx, _) = tokio::sync::broadcast::channel(8);
+        let (web_input_tx, web_input_rx) = tokio::sync::mpsc::channel(64);
+        app.web_tx = Some(web_tx.clone());
+        app.web_input_rx = Some(web_input_rx);
+        tokio::spawn(hom_web::WebServer::new(cli.web_port, web_tx, web_input_tx).run());
+        tracing::info!("Web view at http://localhost:{}", cli.web_port);
     }
 
     // Validate keybinding strings — warn the user about any invalid entries.
@@ -217,10 +236,16 @@ async fn run_app(
     let (health_tx, mut health_rx) = tokio::sync::mpsc::unbounded_channel::<(u32, String, bool)>();
 
     loop {
+        // Forward any browser keystrokes to the focused pane before rendering.
+        app.handle_web_input();
+
         // Draw
         terminal.draw(|frame| {
             render(frame, app);
         })?;
+
+        // Broadcast current pane state to WebSocket clients after rendering.
+        app.publish_web_frame();
 
         // Drain workflow bridge requests (non-blocking)
         while let Ok(req) = workflow_rx.try_recv() {

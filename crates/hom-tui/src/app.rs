@@ -11,7 +11,8 @@ use hom_core::{
 use hom_core::types::{McpCommand, McpRequest, McpResponse, PaneSummary};
 use hom_pty::{AsyncPtyReader, PtyManager};
 use hom_terminal::ActiveBackend;
-use tokio::sync::{mpsc, oneshot};
+use hom_web::{WebCell, WebFrame, WebInput, WebPane};
+use tokio::sync::{broadcast, mpsc, mpsc as tokio_mpsc, oneshot};
 use tracing::info;
 
 use crate::command_bar::CommandBar;
@@ -62,6 +63,10 @@ pub struct App {
     pub total_cost: f64,
     /// Receives MCP requests from the McpServer task. None when not in MCP mode.
     pub mcp_rx: Option<mpsc::Receiver<McpRequest>>,
+    /// Broadcast channel for pushing WebFrame snapshots to WebSocket clients. None when --web is not set.
+    pub web_tx: Option<broadcast::Sender<WebFrame>>,
+    /// Receives browser keystrokes forwarded by the WebSocket server. None when --web is not set.
+    pub web_input_rx: Option<tokio_mpsc::Receiver<WebInput>>,
 }
 
 impl App {
@@ -85,6 +90,8 @@ impl App {
             pending_completions: Vec::new(),
             total_cost: 0.0,
             mcp_rx: None,
+            web_tx: None,
+            web_input_rx: None,
         }
     }
 
@@ -562,6 +569,106 @@ impl App {
                     Err(_) => McpResponse::Error {
                         error: format!("invalid pane_id: {pane_id}"),
                     },
+                }
+            }
+        }
+    }
+
+    /// Serialize current pane state and broadcast to WebSocket clients.
+    /// No-op when --web is not active or no clients are connected.
+    pub fn publish_web_frame(&self) {
+        let Some(tx) = self.web_tx.as_ref() else {
+            return;
+        };
+        if tx.receiver_count() == 0 {
+            return;
+        }
+
+        let panes: Vec<WebPane> = self
+            .panes
+            .iter()
+            .map(|(id, pane)| {
+                let snap = pane.terminal.screen_snapshot();
+                let cells: Vec<WebCell> = snap
+                    .rows
+                    .iter()
+                    .flat_map(|row| {
+                        row.iter().map(|cell| {
+                            use hom_core::TermColor;
+                            let to_rgb = |c: &TermColor| -> u32 {
+                                match c {
+                                    TermColor::Rgb(r, g, b) => {
+                                        (*r as u32) << 16 | (*g as u32) << 8 | *b as u32
+                                    }
+                                    _ => 0xFF_FF_FF,
+                                }
+                            };
+                            WebCell {
+                                ch: cell.character,
+                                fg: to_rgb(&cell.fg),
+                                bg: to_rgb(&cell.bg),
+                                bold: cell.attrs.bold,
+                                italic: cell.attrs.italic,
+                                underline: cell.attrs.underline,
+                            }
+                        })
+                    })
+                    .collect();
+                WebPane {
+                    pane_id: id.to_string(),
+                    title: pane.title.clone(),
+                    cols: snap.cols,
+                    rows: snap.num_rows,
+                    cursor_col: snap.cursor.col,
+                    cursor_row: snap.cursor.row,
+                    cells,
+                    focused: self.focused_pane == Some(*id),
+                }
+            })
+            .collect();
+
+        let _ = tx.send(WebFrame::new(panes));
+    }
+
+    /// Forward browser keystrokes to the targeted pane's PTY.
+    /// No-op when --web is not active.
+    ///
+    /// Uses the same take/put-back pattern as handle_mcp_requests() to avoid
+    /// holding a borrow on self.web_input_rx while calling &mut self methods.
+    pub fn handle_web_input(&mut self) {
+        let mut rx = match self.web_input_rx.take() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let mut inputs: Vec<WebInput> = Vec::with_capacity(16);
+        for _ in 0..16 {
+            match rx.try_recv() {
+                Ok(input) => inputs.push(input),
+                Err(_) => break,
+            }
+        }
+
+        // Restore the receiver before processing inputs.
+        self.web_input_rx = Some(rx);
+
+        for input in inputs {
+            match input.pane_id.parse::<PaneId>() {
+                Ok(id) => {
+                    if let Some(pane) = self.panes.get(&id) {
+                        let adapter = self.adapter_registry.get(&pane.harness_type);
+                        let bytes = adapter
+                            .map(|a| {
+                                a.translate_input(&hom_core::OrchestratorCommand::Prompt(
+                                    input.text.clone(),
+                                ))
+                            })
+                            .unwrap_or_else(|| format!("{}\n", input.text).into_bytes());
+                        let _ = self.pty_manager.write_to(id, &bytes);
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(pane_id = %input.pane_id, "web input: invalid pane_id");
                 }
             }
         }

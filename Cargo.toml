@@ -109,6 +109,7 @@ hom-workflow.workspace = true
 hom-tui.workspace = true
 hom-db.workspace = true
 hom-mcp.workspace = true
+hom-web.workspace = true
 tokio.workspace = true
 clap.workspace = true
 tracing.workspace = true

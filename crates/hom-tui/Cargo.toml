@@ -3,6 +3,8 @@ name = "hom-tui"
 version.workspace = true
 edition.workspace = true
 description = "TUI rendering, input routing, and pane layout management for HOM"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 hom-core.workspace = true
@@ -11,6 +13,7 @@ hom-pty.workspace = true
 hom-adapters.workspace = true
 hom-workflow.workspace = true
 hom-db.workspace = true
+hom-web.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true
