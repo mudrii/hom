@@ -30,6 +30,7 @@ use std::path::Path;
 
 use hom_core::{HarnessAdapter, HarnessType, HomError};
 use hom_plugin::PluginLoader;
+use tracing::warn;
 
 /// Registry of all available harness adapters.
 pub struct AdapterRegistry {
@@ -87,6 +88,9 @@ impl AdapterRegistry {
     pub fn load_plugin(&mut self, path: &Path) -> Result<String, HomError> {
         let adapter = PluginLoader::load(path)?;
         let name = adapter.plugin_name();
+        if self.plugins.contains_key(&name) {
+            warn!(plugin = %name, "overwriting previously loaded plugin with same binary name");
+        }
         self.plugins.insert(name.clone(), Box::new(adapter));
         Ok(name)
     }
@@ -103,6 +107,14 @@ impl AdapterRegistry {
                 name
             })
             .collect()
+    }
+
+    /// Scan the default plugin directory (`~/.config/hom/plugins/`) and register all found plugins.
+    ///
+    /// This is called at startup. Returns the names of loaded plugins.
+    pub fn scan_default_plugin_dir(&mut self) -> Vec<String> {
+        let dir = PluginLoader::default_plugin_dir();
+        self.load_plugins_from_dir(&dir)
     }
 
     /// Names of all loaded plugin adapters.
