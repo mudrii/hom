@@ -78,3 +78,59 @@ impl Default for AdapterRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_registry_contains_all_seven_harnesses() {
+        let registry = AdapterRegistry::new();
+        let expected = [
+            HarnessType::ClaudeCode,
+            HarnessType::CodexCli,
+            HarnessType::GeminiCli,
+            HarnessType::PiMono,
+            HarnessType::KimiCli,
+            HarnessType::OpenCode,
+            HarnessType::CopilotCli,
+        ];
+        for harness in &expected {
+            assert!(
+                registry.get(harness).is_some(),
+                "AdapterRegistry missing adapter for {harness:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_registry_available_returns_seven() {
+        let registry = AdapterRegistry::new();
+        assert_eq!(registry.available().len(), 7, "expected 7 registered adapters");
+    }
+
+    #[test]
+    fn test_registry_adapter_display_name_non_empty() {
+        let registry = AdapterRegistry::new();
+        for harness in registry.available() {
+            let adapter = registry.get(&harness).unwrap();
+            assert!(
+                !adapter.display_name().is_empty(),
+                "display_name() is empty for {harness:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_registry_adapter_harness_type_matches_key() {
+        let registry = AdapterRegistry::new();
+        for harness in registry.available() {
+            let adapter = registry.get(&harness).unwrap();
+            assert_eq!(
+                adapter.harness_type(),
+                harness,
+                "adapter registered under {harness:?} returns wrong harness_type()"
+            );
+        }
+    }
+}

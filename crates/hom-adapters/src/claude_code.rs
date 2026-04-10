@@ -201,4 +201,80 @@ mod tests {
             CompletionStatus::Running
         ));
     }
+
+    // ── build_command ─────────────────────────────────────────────────
+
+    fn default_config() -> HarnessConfig {
+        HarnessConfig::new(HarnessType::ClaudeCode, ".".into())
+    }
+
+    #[test]
+    fn test_build_command_default() {
+        let adapter = ClaudeCodeAdapter::new();
+        let spec = adapter.build_command(&default_config());
+        assert_eq!(spec.program, "claude");
+        assert!(spec.args.is_empty(), "no args when no model or extra_args");
+    }
+
+    #[test]
+    fn test_build_command_with_model() {
+        let adapter = ClaudeCodeAdapter::new();
+        let config = default_config().with_model("claude-opus-4-6");
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.program, "claude");
+        assert_eq!(spec.args, vec!["--model", "claude-opus-4-6"]);
+    }
+
+    #[test]
+    fn test_build_command_with_binary_override() {
+        let adapter = ClaudeCodeAdapter::new();
+        let mut config = default_config();
+        config.binary_override = Some("/usr/local/bin/claude".to_string());
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.program, "/usr/local/bin/claude");
+    }
+
+    #[test]
+    fn test_build_command_extra_args_appended_after_model() {
+        let adapter = ClaudeCodeAdapter::new();
+        let mut config = default_config().with_model("opus");
+        config.extra_args = vec!["--no-auto-update".to_string()];
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--model", "opus", "--no-auto-update"]);
+    }
+
+    // ── translate_input ───────────────────────────────────────────────
+
+    #[test]
+    fn test_translate_prompt() {
+        let adapter = ClaudeCodeAdapter::new();
+        let bytes = adapter.translate_input(&OrchestratorCommand::Prompt("hello".to_string()));
+        assert_eq!(bytes, b"hello\n");
+    }
+
+    #[test]
+    fn test_translate_cancel() {
+        let adapter = ClaudeCodeAdapter::new();
+        assert_eq!(adapter.translate_input(&OrchestratorCommand::Cancel), vec![0x03]);
+    }
+
+    #[test]
+    fn test_translate_accept() {
+        let adapter = ClaudeCodeAdapter::new();
+        assert_eq!(adapter.translate_input(&OrchestratorCommand::Accept), b"y\n");
+    }
+
+    #[test]
+    fn test_translate_reject() {
+        let adapter = ClaudeCodeAdapter::new();
+        assert_eq!(adapter.translate_input(&OrchestratorCommand::Reject), b"n\n");
+    }
+
+    #[test]
+    fn test_translate_raw_passthrough() {
+        let adapter = ClaudeCodeAdapter::new();
+        let payload = vec![0x1b, b'[', b'A'];
+        let bytes = adapter.translate_input(&OrchestratorCommand::Raw(payload.clone()));
+        assert_eq!(bytes, payload);
+    }
 }

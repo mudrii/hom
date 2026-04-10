@@ -196,4 +196,62 @@ mod tests {
             CompletionStatus::Running
         ));
     }
+
+    // ── build_command ─────────────────────────────────────────────────
+
+    fn default_config() -> HarnessConfig {
+        HarnessConfig::new(HarnessType::CodexCli, ".".into())
+    }
+
+    #[test]
+    fn test_build_command_default() {
+        let adapter = CodexAdapter::new();
+        let spec = adapter.build_command(&default_config());
+        assert_eq!(spec.program, "codex");
+        assert!(spec.args.is_empty(), "no args when no model or extra_args");
+    }
+
+    #[test]
+    fn test_build_command_with_model() {
+        let adapter = CodexAdapter::new();
+        let config = default_config().with_model("o3");
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--model", "o3"]);
+    }
+
+    #[test]
+    fn test_build_command_extra_args() {
+        let adapter = CodexAdapter::new();
+        let mut config = default_config();
+        config.extra_args = vec!["--quiet".to_string()];
+        let spec = adapter.build_command(&config);
+        assert_eq!(spec.args, vec!["--quiet"]);
+    }
+
+    // ── translate_input ───────────────────────────────────────────────
+
+    #[test]
+    fn test_translate_prompt() {
+        let adapter = CodexAdapter::new();
+        let bytes = adapter.translate_input(&OrchestratorCommand::Prompt("fix it".to_string()));
+        assert_eq!(bytes, b"fix it\n");
+    }
+
+    #[test]
+    fn test_translate_cancel() {
+        let adapter = CodexAdapter::new();
+        assert_eq!(adapter.translate_input(&OrchestratorCommand::Cancel), vec![0x03]);
+    }
+
+    #[test]
+    fn test_translate_accept() {
+        let adapter = CodexAdapter::new();
+        assert_eq!(adapter.translate_input(&OrchestratorCommand::Accept), b"y\n");
+    }
+
+    #[test]
+    fn test_translate_reject() {
+        let adapter = CodexAdapter::new();
+        assert_eq!(adapter.translate_input(&OrchestratorCommand::Reject), b"n\n");
+    }
 }
