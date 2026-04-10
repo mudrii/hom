@@ -123,3 +123,9 @@ This triggers two workflows automatically:
 
 Add your crates.io API token as a repository secret named `CARGO_REGISTRY_TOKEN`:
 Settings → Secrets and variables → Actions → New repository secret
+
+### Recovery from a partial publish
+
+If `publish.yml` fails partway through, the already-published crates cannot be
+republished at the same version (crates.io has no delete). Bump the patch version
+in `Cargo.toml`, commit, re-tag, and push the new tag to trigger a fresh publish.
