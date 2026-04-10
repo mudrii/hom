@@ -158,7 +158,49 @@ impl InputRouter {
             // ── In command bar mode, send keys to command bar ─────
             (InputMode::CommandBar, Event::Key(key_event)) => Action::CommandBarInput(*key_event),
 
-            // ── Mouse click focuses a pane ────────────────────────
+            // ── In pane mode, forward all mouse events to the focused PTY ─────────
+            // Exception: a left-click landing on a *different* pane switches focus
+            // instead of forwarding (tmux-style click-to-focus).
+            (InputMode::PaneInput { .. }, Event::Mouse(mouse_evt)) => {
+                // Copy focused_id without retaining a borrow into self.mode so we
+                // can safely reassign self.mode below when switching focus.
+                let focused_id = if let InputMode::PaneInput { focused } = &self.mode {
+                    *focused
+                } else {
+                    return Action::None;
+                };
+
+                // Left-click outside the focused pane → switch focus.
+                if matches!(mouse_evt.kind, MouseEventKind::Down(MouseButton::Left))
+                    && let Some(clicked) = super::layout::pane_at_position(
+                        pane_areas,
+                        mouse_evt.column,
+                        mouse_evt.row,
+                    )
+                    && clicked != focused_id
+                {
+                    self.mode = InputMode::PaneInput { focused: clicked };
+                    return Action::FocusPane(clicked);
+                }
+
+                // All other events (and same-pane left-clicks) → X10-encode and forward.
+                let focused_area = pane_areas
+                    .iter()
+                    .find(|(id, _)| *id == focused_id)
+                    .map(|(_, a)| *a);
+                let bytes = match focused_area {
+                    Some(area) => encode_mouse_event(
+                        &mouse_evt.kind,
+                        mouse_evt.column.saturating_sub(area.x + 1),
+                        mouse_evt.row.saturating_sub(area.y + 1),
+                        mouse_evt.modifiers,
+                    ),
+                    None => Vec::new(),
+                };
+                if bytes.is_empty() { Action::None } else { Action::WriteToPty(focused_id, bytes) }
+            }
+
+            // ── Mouse click focuses a pane (CommandBar / WorkflowControl modes) ──
             (
                 _,
                 Event::Mouse(MouseEvent {
@@ -462,6 +504,106 @@ mod tests {
     fn test_encode_enter() {
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(encode_key_event(&key), vec![b'\r']);
+    }
+
+    // ── handle_event: mouse forwarding ───────────────────────────────
+
+    fn make_two_pane_areas() -> Vec<(PaneId, ratatui::layout::Rect)> {
+        use ratatui::layout::Rect;
+        vec![
+            (1, Rect { x: 0, y: 0, width: 40, height: 24 }),
+            (2, Rect { x: 40, y: 0, width: 40, height: 24 }),
+        ]
+    }
+
+    #[test]
+    fn test_scroll_up_on_focused_pane_writes_to_pty() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut router = InputRouter::new();
+        router.focus_pane(1);
+        let areas = make_two_pane_areas();
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10, // inside pane 1 (x: 0..40)
+            row: 5,
+            modifiers: KeyModifiers::empty(),
+        });
+        let action = router.handle_event(event, &areas);
+        // pane-relative col = 10 - (0+1) = 9, row = 5 - (0+1) = 4
+        // Cb=96, Cx=(9+1)+32=42, Cy=(4+1)+32=37
+        assert!(
+            matches!(action, Action::WriteToPty(1, _)),
+            "expected WriteToPty(1, ...), got: {action:?}"
+        );
+        if let Action::WriteToPty(_, bytes) = action {
+            assert_eq!(bytes, vec![0x1b, b'[', b'M', 96, 42, 37]);
+        }
+    }
+
+    #[test]
+    fn test_left_click_on_different_pane_switches_focus() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut router = InputRouter::new();
+        router.focus_pane(1);
+        let areas = make_two_pane_areas();
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 45, // inside pane 2 (x: 40..80)
+            row: 5,
+            modifiers: KeyModifiers::empty(),
+        });
+        let action = router.handle_event(event, &areas);
+        assert!(
+            matches!(action, Action::FocusPane(2)),
+            "expected FocusPane(2), got: {action:?}"
+        );
+        assert!(
+            matches!(router.mode, InputMode::PaneInput { focused: 2 }),
+            "mode should be PaneInput {{ focused: 2 }}"
+        );
+    }
+
+    #[test]
+    fn test_left_click_on_focused_pane_writes_to_pty() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut router = InputRouter::new();
+        router.focus_pane(1);
+        let areas = make_two_pane_areas();
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5, // inside pane 1
+            row: 5,
+            modifiers: KeyModifiers::empty(),
+        });
+        let action = router.handle_event(event, &areas);
+        // pane-relative col=5-(0+1)=4, row=5-(0+1)=4
+        // Cb=32 (Left+no mods), Cx=(4+1)+32=37, Cy=(4+1)+32=37
+        assert!(
+            matches!(action, Action::WriteToPty(1, _)),
+            "expected WriteToPty(1, ...), got: {action:?}"
+        );
+        if let Action::WriteToPty(_, bytes) = action {
+            assert_eq!(bytes, vec![0x1b, b'[', b'M', 32, 37, 37]);
+        }
+    }
+
+    #[test]
+    fn test_mouse_move_in_pane_input_produces_no_action() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut router = InputRouter::new();
+        router.focus_pane(1);
+        let areas = make_two_pane_areas();
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::empty(),
+        });
+        let action = router.handle_event(event, &areas);
+        assert!(
+            matches!(action, Action::None),
+            "Moved events should produce no action, got: {action:?}"
+        );
     }
 
     // ── encode_mouse_event ────────────────────────────────────────────
