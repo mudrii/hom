@@ -295,7 +295,11 @@ async fn run_app(
                 for (pane_id, area) in &new_areas {
                     let inner_w = area.width.saturating_sub(2);
                     let inner_h = area.height.saturating_sub(2);
-                    let _ = app.pty_manager.resize(*pane_id, inner_w, inner_h);
+                    if app.remote_ptys.has_pane(*pane_id) {
+                        let _ = app.remote_ptys.resize(*pane_id, inner_w, inner_h);
+                    } else {
+                        let _ = app.pty_manager.resize(*pane_id, inner_w, inner_h);
+                    }
                     if let Some(pane) = app.panes.get_mut(pane_id) {
                         pane.terminal.resize(inner_w, inner_h);
                     }
@@ -525,7 +529,11 @@ fn handle_command(
             for (pane_id, area) in &new_areas {
                 let inner_w = area.width.saturating_sub(2);
                 let inner_h = area.height.saturating_sub(2);
-                let _ = app.pty_manager.resize(*pane_id, inner_w, inner_h);
+                if app.remote_ptys.has_pane(*pane_id) {
+                    let _ = app.remote_ptys.resize(*pane_id, inner_w, inner_h);
+                } else {
+                    let _ = app.pty_manager.resize(*pane_id, inner_w, inner_h);
+                }
                 if let Some(pane) = app.panes.get_mut(pane_id) {
                     use hom_core::TerminalBackend;
                     pane.terminal.resize(inner_w, inner_h);

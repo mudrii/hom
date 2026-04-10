@@ -24,6 +24,9 @@ use crate::workflow_progress::WorkflowProgress;
 pub struct Pane {
     pub id: PaneId,
     pub harness_type: HarnessType,
+    /// Set for plugin-backed panes; None for built-in harness types.
+    /// Used to look up the correct plugin adapter in poll_pending_completions and poll_pty_output.
+    pub plugin_name: Option<String>,
     pub model: Option<String>,
     pub title: String,
     pub terminal: ActiveBackend,
@@ -80,10 +83,9 @@ impl App {
         let mut adapter_registry = AdapterRegistry::new();
 
         // Auto-load any plugins from ~/.config/hom/plugins/ at startup.
-        let plugin_dir = hom_plugin::PluginLoader::default_plugin_dir();
-        let loaded = adapter_registry.load_plugins_from_dir(&plugin_dir);
+        let loaded = adapter_registry.scan_default_plugin_dir();
         if !loaded.is_empty() {
-            tracing::info!(plugins = ?loaded, "auto-loaded plugins from {}", plugin_dir.display());
+            tracing::info!(plugins = ?loaded, "auto-loaded plugins at startup");
         }
 
         Self {
@@ -112,8 +114,9 @@ impl App {
     pub fn handle_load_plugin(&mut self, path: &std::path::Path) {
         match self.adapter_registry.load_plugin(path) {
             Ok(name) => {
+                // Success is logged; no last_error update because the render prefixes
+                // last_error with "Error:" in red, which is confusing for a success message.
                 tracing::info!(plugin = %name, "loaded plugin adapter");
-                self.command_bar.last_error = Some(format!("plugin '{name}' loaded"));
             }
             Err(e) => {
                 self.command_bar.last_error = Some(format!("plugin load failed: {e}"));
@@ -286,6 +289,11 @@ impl App {
         let pane = Pane {
             id: pane_id,
             harness_type: pane_harness_type,
+            plugin_name: if harness.is_none() {
+                Some(harness_name.to_string())
+            } else {
+                None
+            },
             model: model.clone(),
             title,
             terminal,
@@ -389,6 +397,7 @@ impl App {
         let pane = Pane {
             id: pane_id,
             harness_type,
+            plugin_name: None,
             model: model.clone(),
             title,
             terminal,
@@ -416,7 +425,12 @@ impl App {
             reader.abort();
         }
 
-        self.pty_manager.kill(pane_id)?;
+        // Remote panes are tracked by remote_ptys; local panes by pty_manager.
+        if self.remote_ptys.has_pane(pane_id) {
+            self.remote_ptys.kill(pane_id)?;
+        } else {
+            self.pty_manager.kill(pane_id)?;
+        }
         self.panes.remove(&pane_id);
         self.pane_order.retain(|&id| id != pane_id);
 
@@ -487,11 +501,19 @@ impl App {
 
             if let Some(pane) = self.panes.get(&pending.pane_id) {
                 let snapshot = pane.terminal.screen_snapshot();
-                let adapter = self.adapter_registry.get(&pane.harness_type);
 
-                let status = adapter
-                    .map(|a| a.detect_completion(&snapshot))
-                    .unwrap_or(hom_core::CompletionStatus::Running);
+                // Plugin panes must use the plugin adapter, not the ClaudeCode placeholder.
+                let status = if let Some(ref plugin_name) = pane.plugin_name {
+                    self.adapter_registry
+                        .get_plugin(plugin_name)
+                        .map(|a| a.detect_completion(&snapshot))
+                        .unwrap_or(hom_core::CompletionStatus::Running)
+                } else {
+                    self.adapter_registry
+                        .get(&pane.harness_type)
+                        .map(|a| a.detect_completion(&snapshot))
+                        .unwrap_or(hom_core::CompletionStatus::Running)
+                };
 
                 match status {
                     hom_core::CompletionStatus::WaitingForInput => {
@@ -568,14 +590,24 @@ impl App {
                 }
             }
 
-            // After processing new data, scan for token usage events
+            // After processing new data, scan for token usage events.
+            // Plugin panes must use the plugin adapter for screen parsing.
             if had_data && let Some(pane) = self.panes.get(&pane_id) {
                 let snapshot = pane.terminal.screen_snapshot();
-                if let Some(adapter) = self.adapter_registry.get(&pane.harness_type) {
-                    for event in adapter.parse_screen(&snapshot) {
-                        if matches!(event, hom_core::HarnessEvent::TokenUsage { .. }) {
-                            token_events.push((pane_id, pane.harness_type, event));
-                        }
+                let events = if let Some(ref plugin_name) = pane.plugin_name {
+                    self.adapter_registry
+                        .get_plugin(plugin_name)
+                        .map(|a| a.parse_screen(&snapshot))
+                        .unwrap_or_default()
+                } else {
+                    self.adapter_registry
+                        .get(&pane.harness_type)
+                        .map(|a| a.parse_screen(&snapshot))
+                        .unwrap_or_default()
+                };
+                for event in events {
+                    if matches!(event, hom_core::HarnessEvent::TokenUsage { .. }) {
+                        token_events.push((pane_id, pane.harness_type, event));
                     }
                 }
             }
