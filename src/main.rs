@@ -518,57 +518,47 @@ fn handle_workflow_request(
             timeout,
             reply,
         } => {
-            // Write the prompt to the pane's PTY, then register for
-            // completion polling. The main event loop calls
-            // poll_pending_completions() each tick, which uses
-            // detect_completion() to determine when the harness is done
-            // and reads the screen text as output.
-            let write_result = if let Some(pane) = app.panes.get(&pane_id) {
-                // Prefer sideband channel when available (e.g. OpenCode HTTP API)
-                if let Some(ref sideband) = pane.sideband {
-                    // Sideband channels handle prompt delivery and response
-                    // in a single call — no need for completion polling.
-                    let sideband: &dyn hom_core::SidebandChannel = sideband.as_ref();
-                    // We can't call async from here, so spawn a task for sideband
-                    let prompt_clone = prompt.clone();
-                    // SAFETY: sideband is Send+Sync (trait bound on SidebandChannel)
-                    // We need to clone the Box<dyn> to move into the task.
-                    // Instead, send via PTY and let completion polling handle it.
-                    // TODO: full sideband integration requires an async bridge
-                    let _ = sideband;
+            if let Some(pane) = app.panes.get(&pane_id) {
+                if let Some(sideband) = pane.sideband.clone() {
+                    // Sideband available — spawn async task for direct prompt/response.
+                    // This bypasses PTY write and completion polling entirely.
+                    tokio::spawn(async move {
+                        let result =
+                            tokio::time::timeout(timeout, sideband.send_prompt(&prompt)).await;
+                        let response = match result {
+                            Ok(Ok(output)) => Ok(output),
+                            Ok(Err(e)) => Err(e),
+                            Err(_) => Err(hom_core::HomError::WorkflowTimeout(timeout.as_secs())),
+                        };
+                        let _ = reply.send(response);
+                    });
+                } else {
+                    // No sideband — write to PTY and register for completion polling.
                     let adapter = app.adapter_registry.get(&pane.harness_type);
                     let bytes = adapter
                         .map(|a| {
-                            a.translate_input(&hom_core::OrchestratorCommand::Prompt(prompt_clone))
+                            a.translate_input(&hom_core::OrchestratorCommand::Prompt(
+                                prompt.clone(),
+                            ))
                         })
                         .unwrap_or_else(|| format!("{prompt}\n").into_bytes());
-                    app.pty_manager.write_to(pane_id, &bytes)
-                } else {
-                    let adapter = app.adapter_registry.get(&pane.harness_type);
-                    let bytes = adapter
-                        .map(|a| a.translate_input(&hom_core::OrchestratorCommand::Prompt(prompt)))
-                        .unwrap_or_else(|| b"prompt\n".to_vec());
-                    app.pty_manager.write_to(pane_id, &bytes)
+                    match app.pty_manager.write_to(pane_id, &bytes) {
+                        Ok(()) => {
+                            app.pending_completions
+                                .push(hom_tui::app::PendingCompletion {
+                                    pane_id,
+                                    reply,
+                                    started: std::time::Instant::now(),
+                                    timeout,
+                                });
+                        }
+                        Err(e) => {
+                            let _ = reply.send(Err(e));
+                        }
+                    }
                 }
             } else {
-                Err(hom_core::HomError::PaneNotFound(pane_id))
-            };
-
-            match write_result {
-                Ok(()) => {
-                    // Register for completion polling — the main event loop
-                    // calls app.poll_pending_completions() each tick.
-                    app.pending_completions
-                        .push(hom_tui::app::PendingCompletion {
-                            pane_id,
-                            reply,
-                            started: std::time::Instant::now(),
-                            timeout,
-                        });
-                }
-                Err(e) => {
-                    let _ = reply.send(Err(e));
-                }
+                let _ = reply.send(Err(hom_core::HomError::PaneNotFound(pane_id)));
             }
         }
         WorkflowRequest::KillPane { pane_id, reply } => {
