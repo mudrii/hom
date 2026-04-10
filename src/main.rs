@@ -384,60 +384,7 @@ fn handle_command(
                 app.command_bar.last_error = Some("pane not found".to_string());
             }
         }
-        Command::Pipe { source, target } => {
-            // Pipe: extract structured output from source pane, write to target PTY.
-            // Uses adapter's parse_screen() for structured events when available,
-            // falls back to raw screen text otherwise.
-            let source_id = resolve_selector(&source, app);
-            let target_id = resolve_selector(&target, app);
-            match (source_id, target_id) {
-                (Some(src), Some(tgt)) => {
-                    let output = if let Some(pane) = app.panes.get(&src) {
-                        let snapshot = pane.terminal.screen_snapshot();
-                        // Try adapter's parse_screen() for structured output
-                        let events = app
-                            .adapter_registry
-                            .get(&pane.harness_type)
-                            .map(|a| a.parse_screen(&snapshot))
-                            .unwrap_or_default();
-                        if events.is_empty() {
-                            // Fallback: use last N lines of raw screen text
-                            // (avoids sending blank padding and scroll history)
-                            snapshot.last_n_lines(20)
-                        } else {
-                            // Format structured events as newline-separated text
-                            events
-                                .iter()
-                                .map(|e| format!("{e:?}"))
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
-                    } else {
-                        String::new()
-                    };
-
-                    // Use adapter translation for the target pane
-                    let bytes = if let Some(tgt_pane) = app.panes.get(&tgt) {
-                        let adapter = app.adapter_registry.get(&tgt_pane.harness_type);
-                        adapter
-                            .map(|a| {
-                                a.translate_input(&hom_core::OrchestratorCommand::Prompt(
-                                    output.clone(),
-                                ))
-                            })
-                            .unwrap_or_else(|| format!("{output}\n").into_bytes())
-                    } else {
-                        format!("{output}\n").into_bytes()
-                    };
-                    let _ = app.pty_manager.write_to(tgt, &bytes);
-                    info!(source = src, target = tgt, "piped output between panes");
-                }
-                _ => {
-                    app.command_bar.last_error =
-                        Some("source or target pane not found".to_string());
-                }
-            }
-        }
+        Command::Pipe { source, target } => handle_pipe(app, source, target)?,
         Command::Broadcast(msg) => {
             for pane_id in &app.pane_order {
                 // Use adapter translation per-pane so each harness gets correctly formatted input
@@ -461,115 +408,9 @@ fn handle_command(
         Command::Run {
             workflow,
             variables,
-        } => {
-            // Load workflow from config workflow dir
-            let workflow_dir = app.config.workflow_dir();
-            let workflow_path = workflow_dir.join(format!("{workflow}.yaml"));
-            if workflow_path.exists() {
-                match hom_workflow::parser::WorkflowDef::from_file(&workflow_path) {
-                    Ok(def) => {
-                        app.workflow_progress = Some(WorkflowProgress::new(
-                            workflow.clone(),
-                            def.steps.iter().map(|s| s.id.clone()).collect(),
-                        ));
-                        info!(
-                            workflow = %workflow,
-                            steps = def.steps.len(),
-                            vars = ?variables,
-                            "workflow loaded, launching executor"
-                        );
-                        // Spawn the workflow executor in a background task
-                        let bridge_clone = bridge.clone();
-                        let db = app.db.clone();
-                        let wf_name = workflow.clone();
-                        tokio::spawn(async move {
-                            run_workflow_task(def, bridge_clone, variables, db, &wf_name).await;
-                        });
-                    }
-                    Err(e) => {
-                        app.command_bar.last_error = Some(format!("workflow parse error: {e}"));
-                    }
-                }
-            } else {
-                app.command_bar.last_error =
-                    Some(format!("workflow not found: {}", workflow_path.display()));
-            }
-        }
-        Command::Save(name) => {
-            if let Some(ref db) = app.db {
-                let (layout_json, panes_json) = app.session_snapshot();
-                let session_id = uuid::Uuid::new_v4().to_string();
-                let db = db.clone();
-                let name_clone = name.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = hom_db::session::save_session(
-                        db.pool(),
-                        &session_id,
-                        &name_clone,
-                        &layout_json,
-                        &panes_json,
-                    )
-                    .await
-                    {
-                        warn!(error = %e, "session save failed");
-                    }
-                });
-                app.command_bar.last_error = Some(format!("session '{name}' saved"));
-                info!(session = %name, "session saved");
-            } else {
-                app.command_bar.last_error =
-                    Some("no database available for session save".to_string());
-            }
-        }
-        Command::Restore(name) => {
-            if let Some(ref db) = app.db {
-                let db = db.clone();
-                let name_clone = name.clone();
-                // Load session synchronously enough to get pane configs.
-                // We use block_in_place since we need the result immediately.
-                let load_result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(hom_db::session::load_session(db.pool(), &name_clone))
-                });
-                match load_result {
-                    Ok(Some((layout_json, panes_json))) => {
-                        // Restore layout
-                        if let Ok(layout) = serde_json::from_str::<LayoutKind>(&layout_json) {
-                            app.layout = layout;
-                        }
-                        // Restore panes
-                        if let Ok(pane_configs) = serde_json::from_str::<
-                            Vec<hom_tui::app::SessionPaneConfig>,
-                        >(&panes_json)
-                        {
-                            let cols = terminal_size.width.saturating_sub(2);
-                            let rows = terminal_size.height.saturating_sub(6);
-                            for pc in &pane_configs {
-                                if let Err(e) =
-                                    app.spawn_pane(pc.harness_type, pc.model.clone(), cols, rows)
-                                {
-                                    warn!(error = %e, "failed to restore pane");
-                                }
-                            }
-                            app.command_bar.last_error = Some(format!(
-                                "session '{name}' restored ({} panes)",
-                                pane_configs.len()
-                            ));
-                        }
-                        info!(session = %name, "session restored");
-                    }
-                    Ok(None) => {
-                        app.command_bar.last_error = Some(format!("session '{name}' not found"));
-                    }
-                    Err(e) => {
-                        app.command_bar.last_error = Some(format!("session restore failed: {e}"));
-                    }
-                }
-            } else {
-                app.command_bar.last_error =
-                    Some("no database available for session restore".to_string());
-            }
-        }
+        } => handle_run(app, workflow, variables, bridge)?,
+        Command::Save(name) => handle_save(app, name),
+        Command::Restore(name) => handle_restore(app, name, terminal_size),
     }
 
     Ok(())
@@ -589,6 +430,178 @@ fn resolve_selector(selector: &hom_tui::command_bar::PaneSelector, app: &App) ->
             .iter()
             .find(|(_, p)| p.title.to_lowercase().contains(&name.to_lowercase()))
             .map(|(id, _)| *id),
+    }
+}
+
+fn handle_pipe(
+    app: &mut App,
+    source: hom_tui::command_bar::PaneSelector,
+    target: hom_tui::command_bar::PaneSelector,
+) -> anyhow::Result<()> {
+    // Pipe: extract structured output from source pane, write to target PTY.
+    // Uses adapter's parse_screen() for structured events when available,
+    // falls back to raw screen text otherwise.
+    let source_id = resolve_selector(&source, app);
+    let target_id = resolve_selector(&target, app);
+    match (source_id, target_id) {
+        (Some(src), Some(tgt)) => {
+            let output = if let Some(pane) = app.panes.get(&src) {
+                let snapshot = pane.terminal.screen_snapshot();
+                // Try adapter's parse_screen() for structured output
+                let events = app
+                    .adapter_registry
+                    .get(&pane.harness_type)
+                    .map(|a| a.parse_screen(&snapshot))
+                    .unwrap_or_default();
+                if events.is_empty() {
+                    // Fallback: use last N lines of raw screen text
+                    // (avoids sending blank padding and scroll history)
+                    snapshot.last_n_lines(20)
+                } else {
+                    // Format structured events as newline-separated text
+                    events
+                        .iter()
+                        .map(|e| format!("{e:?}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            } else {
+                String::new()
+            };
+
+            // Use adapter translation for the target pane
+            let bytes = if let Some(tgt_pane) = app.panes.get(&tgt) {
+                let adapter = app.adapter_registry.get(&tgt_pane.harness_type);
+                adapter
+                    .map(|a| {
+                        a.translate_input(&hom_core::OrchestratorCommand::Prompt(output.clone()))
+                    })
+                    .unwrap_or_else(|| format!("{output}\n").into_bytes())
+            } else {
+                format!("{output}\n").into_bytes()
+            };
+            let _ = app.pty_manager.write_to(tgt, &bytes);
+            info!(source = src, target = tgt, "piped output between panes");
+        }
+        _ => {
+            app.command_bar.last_error = Some("source or target pane not found".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn handle_run(
+    app: &mut App,
+    workflow: String,
+    variables: HashMap<String, String>,
+    bridge: &Arc<WorkflowBridge>,
+) -> anyhow::Result<()> {
+    // Load workflow from config workflow dir
+    let workflow_dir = app.config.workflow_dir();
+    let workflow_path = workflow_dir.join(format!("{workflow}.yaml"));
+    if workflow_path.exists() {
+        match hom_workflow::parser::WorkflowDef::from_file(&workflow_path) {
+            Ok(def) => {
+                app.workflow_progress = Some(WorkflowProgress::new(
+                    workflow.clone(),
+                    def.steps.iter().map(|s| s.id.clone()).collect(),
+                ));
+                info!(
+                    workflow = %workflow,
+                    steps = def.steps.len(),
+                    vars = ?variables,
+                    "workflow loaded, launching executor"
+                );
+                // Spawn the workflow executor in a background task
+                let bridge_clone = bridge.clone();
+                let db = app.db.clone();
+                let wf_name = workflow.clone();
+                tokio::spawn(async move {
+                    run_workflow_task(def, bridge_clone, variables, db, &wf_name).await;
+                });
+            }
+            Err(e) => {
+                app.command_bar.last_error = Some(format!("workflow parse error: {e}"));
+            }
+        }
+    } else {
+        app.command_bar.last_error =
+            Some(format!("workflow not found: {}", workflow_path.display()));
+    }
+    Ok(())
+}
+
+fn handle_save(app: &mut App, name: String) {
+    if let Some(ref db) = app.db {
+        let (layout_json, panes_json) = app.session_snapshot();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let db = db.clone();
+        let name_clone = name.clone();
+        tokio::spawn(async move {
+            if let Err(e) = hom_db::session::save_session(
+                db.pool(),
+                &session_id,
+                &name_clone,
+                &layout_json,
+                &panes_json,
+            )
+            .await
+            {
+                warn!(error = %e, "session save failed");
+            }
+        });
+        app.command_bar.last_error = Some(format!("session '{name}' saved"));
+        info!(session = %name, "session saved");
+    } else {
+        app.command_bar.last_error = Some("no database available for session save".to_string());
+    }
+}
+
+fn handle_restore(app: &mut App, name: String, terminal_size: ratatui::layout::Rect) {
+    if let Some(ref db) = app.db {
+        let db = db.clone();
+        let name_clone = name.clone();
+        // Load session synchronously enough to get pane configs.
+        // We use block_in_place since we need the result immediately.
+        let load_result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(hom_db::session::load_session(db.pool(), &name_clone))
+        });
+        match load_result {
+            Ok(Some((layout_json, panes_json))) => {
+                // Restore layout
+                if let Ok(layout) = serde_json::from_str::<LayoutKind>(&layout_json) {
+                    app.layout = layout;
+                }
+                // Restore panes
+                if let Ok(pane_configs) =
+                    serde_json::from_str::<Vec<hom_tui::app::SessionPaneConfig>>(&panes_json)
+                {
+                    let cols = terminal_size.width.saturating_sub(2);
+                    let rows = terminal_size.height.saturating_sub(6);
+                    for pc in &pane_configs {
+                        if let Err(e) =
+                            app.spawn_pane(pc.harness_type, pc.model.clone(), cols, rows)
+                        {
+                            warn!(error = %e, "failed to restore pane");
+                        }
+                    }
+                    app.command_bar.last_error = Some(format!(
+                        "session '{name}' restored ({} panes)",
+                        pane_configs.len()
+                    ));
+                }
+                info!(session = %name, "session restored");
+            }
+            Ok(None) => {
+                app.command_bar.last_error = Some(format!("session '{name}' not found"));
+            }
+            Err(e) => {
+                app.command_bar.last_error = Some(format!("session restore failed: {e}"));
+            }
+        }
+    } else {
+        app.command_bar.last_error = Some("no database available for session restore".to_string());
     }
 }
 
