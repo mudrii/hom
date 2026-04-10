@@ -1,0 +1,35 @@
+name: debugging
+description: Systematic bug investigation and fix
+
+variables:
+  harness: claude
+  bug: ""
+
+steps:
+  - id: reproduce
+    harness: "{{ harness }}"
+    prompt: |
+      Reproduce and analyze this bug: {{ bug }}
+      Find the root cause. Show the failing test case.
+    timeout: 5m
+
+  - id: fix
+    harness: "{{ harness }}"
+    depends_on: [reproduce]
+    prompt: |
+      Fix the root cause identified:
+      {{ steps.reproduce.output }}
+      Write the minimal fix. Include a regression test.
+    timeout: 10m
+    retry:
+      max_attempts: 2
+      backoff: linear
+
+  - id: verify
+    harness: "{{ harness }}"
+    depends_on: [fix]
+    prompt: |
+      Verify the fix is correct:
+      {{ steps.fix.output }}
+      Run all related tests. Confirm no regressions.
+    timeout: 5m

@@ -1,0 +1,37 @@
+name: parallel-analysis
+description: Analyze code from multiple perspectives concurrently
+
+variables:
+  task: ""
+
+steps:
+  - id: security
+    harness: claude
+    prompt: |
+      Security review: {{ task }}
+      Focus on OWASP top 10, input validation, auth boundaries.
+    timeout: 5m
+
+  - id: performance
+    harness: gemini
+    prompt: |
+      Performance review: {{ task }}
+      Focus on algorithmic complexity, memory usage, I/O patterns.
+    timeout: 5m
+
+  - id: maintainability
+    harness: codex
+    prompt: |
+      Maintainability review: {{ task }}
+      Focus on code clarity, coupling, test coverage gaps.
+    timeout: 5m
+
+  - id: synthesis
+    harness: claude
+    depends_on: [security, performance, maintainability]
+    prompt: |
+      Synthesize these three reviews into prioritized action items:
+      Security: {{ steps.security.output }}
+      Performance: {{ steps.performance.output }}
+      Maintainability: {{ steps.maintainability.output }}
+    timeout: 5m

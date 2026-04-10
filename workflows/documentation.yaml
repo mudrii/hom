@@ -1,0 +1,23 @@
+name: documentation
+description: Generate documentation from code analysis
+
+variables:
+  harness: claude
+  scope: ""
+
+steps:
+  - id: analyze
+    harness: "{{ harness }}"
+    prompt: |
+      Analyze the codebase for: {{ scope }}
+      List all public APIs, their purposes, and usage patterns.
+    timeout: 5m
+
+  - id: document
+    harness: "{{ harness }}"
+    depends_on: [analyze]
+    prompt: |
+      Write clear documentation based on:
+      {{ steps.analyze.output }}
+      Include examples for each public API.
+    timeout: 10m

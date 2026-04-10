@@ -1,0 +1,38 @@
+name: test-driven-development
+description: Write tests first, then implement, then refactor
+
+variables:
+  harness: claude
+  task: ""
+
+steps:
+  - id: write-tests
+    harness: "{{ harness }}"
+    prompt: |
+      Write failing tests for: {{ task }}
+      Focus on behavior, not implementation. Cover happy path,
+      edge cases, and error conditions. Output the test file contents.
+    timeout: 5m
+
+  - id: implement
+    harness: "{{ harness }}"
+    depends_on: [write-tests]
+    prompt: |
+      Implement the minimal code to make these tests pass:
+      {{ steps.write-tests.output }}
+      Do not add features beyond what the tests require.
+    timeout: 10m
+    retry:
+      max_attempts: 2
+      backoff: exponential
+
+  - id: refactor
+    harness: "{{ harness }}"
+    depends_on: [implement]
+    condition: 'steps.implement.status == "completed"'
+    prompt: |
+      Refactor the implementation for clarity and maintainability
+      while keeping all tests green:
+      {{ steps.implement.output }}
+    timeout: 5m
+    on_failure: skip

@@ -1,0 +1,35 @@
+name: refactor-with-tests
+description: Safe refactoring with test coverage verification
+
+variables:
+  harness: claude
+  target: ""
+
+steps:
+  - id: audit
+    harness: "{{ harness }}"
+    prompt: |
+      Audit the test coverage for: {{ target }}
+      List what is tested and what is missing.
+    timeout: 5m
+
+  - id: add-tests
+    harness: "{{ harness }}"
+    depends_on: [audit]
+    prompt: |
+      Add missing tests identified in the audit:
+      {{ steps.audit.output }}
+      All tests must pass before refactoring.
+    timeout: 10m
+
+  - id: refactor
+    harness: "{{ harness }}"
+    depends_on: [add-tests]
+    condition: 'steps.add-tests.status == "completed"'
+    prompt: |
+      Refactor {{ target }} for clarity and maintainability.
+      All existing tests must remain green.
+    timeout: 10m
+    retry:
+      max_attempts: 2
+      backoff: exponential
