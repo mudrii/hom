@@ -58,6 +58,7 @@ pub struct App {
 impl App {
     pub fn new(config: HomConfig) -> Self {
         let layout = config.general.default_layout.clone();
+        let input_router = InputRouter::from_config(&config.keybindings);
 
         Self {
             config,
@@ -65,7 +66,7 @@ impl App {
             pane_order: Vec::new(),
             focused_pane: None,
             layout,
-            input_router: InputRouter::new(),
+            input_router,
             command_bar: CommandBar::new(),
             adapter_registry: AdapterRegistry::new(),
             pty_manager: PtyManager::new(),
