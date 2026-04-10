@@ -41,6 +41,7 @@ HOM is a Rust-based TUI terminal multiplexer and orchestrator for 7 AI coding ag
 | `hom-db` | SQLite via sqlx — workflows, steps, sessions, cost_log |
 | `hom-mcp` | MCP server — JSON-RPC 2.0 over stdin/stdout, 6 tools, `--mcp` flag |
 | `hom-web` | WebSocket HTTP server — Canvas2D live pane viewer, axum 0.8, WebFrame serialisation |
+| `hom-plugin` | C ABI vtable (`HomPluginVtable`), `PluginLoader`, `PluginAdapter` |
 
 ## Key Technical Decisions
 
@@ -86,7 +87,8 @@ Workspace: add `--workspace` to check/test/nextest/clippy. Feature/doc changes: 
 - `hom-core` has ZERO internal crate dependencies — it is the root
 - `hom-terminal` depends on `hom-core` only
 - `hom-pty` depends on `hom-core` only
-- `hom-adapters` depends on `hom-core` only
+- `hom-plugin` depends on `hom-core` only
+- `hom-adapters` depends on `hom-core`, `hom-plugin`
 - `hom-workflow` depends on `hom-core` only
 - `hom-tui` depends on `hom-core`, `hom-terminal`, `hom-pty`, `hom-adapters`, `hom-workflow`, `hom-db`
 - `hom-db` depends on `hom-core` only
@@ -218,7 +220,8 @@ hom/
 │   ├── hom-workflow/src/        # lib.rs, parser.rs, dag.rs, executor.rs, condition.rs, checkpoint.rs
 │   ├── hom-tui/src/             # lib.rs, app.rs, render.rs, pane_render.rs, input.rs,
 │   │                            # command_bar.rs, layout.rs, status_rail.rs
-│   └── hom-db/src/              # lib.rs, workflow.rs, session.rs, cost.rs, migrations/001_initial.sql
+│   ├── hom-db/src/              # lib.rs, workflow.rs, session.rs, cost.rs, migrations/001_initial.sql
+│   └── hom-plugin/src/          # lib.rs, ffi.rs, loader.rs, adapter.rs
 ├── src/main.rs                  # Binary entry point — event loop, CLI, terminal setup
 ├── .claude/
 │   ├── rules/rust-patterns.md   # Rust style, API, type, and readability patterns
@@ -399,6 +402,21 @@ hom/
 - `:spawn <harness> --remote user@host[:port]` parsed in command bar; routes to `App::spawn_remote_pane()`
 - `App::shutdown()` calls `remote_ptys.kill_all()` for graceful cleanup
 - 7 unit tests for `RemotePtyManager` + 3 for command bar `--remote` flag parsing
+
+**Resolved (April 10, 2026 — Plugin system):**
+- `crates/hom-plugin/` new crate — stable C ABI vtable (`HomPluginVtable`, ABI v1)
+- `HomInputKind` `#[repr(u32)]` enum replaces stringly-typed `u32` in `translate_input` vtable fn
+- `HomPluginVtable` uses JSON strings for all complex data crossing FFI (ScreenSnapshot, HarnessEvent, CompletionStatus)
+- `PluginLoader::load(path)` — validates ABI version, calls `hom_plugin_init`, wraps vtable in `PluginAdapter`
+- `PluginLoader::scan_dir(dir)` — discovers `.dylib`/`.so` files, logs failures, returns adapters
+- `PluginLoader::default_plugin_dir()` — `~/.config/hom/plugins/`
+- `PluginAdapter` implements `HarnessAdapter` — all methods dispatch through JSON FFI; `hom_plugin_destroy` called on drop
+- `decode_hex_bytes()` converts hex-encoded PTY bytes returned by plugin `translate_input`
+- `AdapterRegistry::load_plugin(path)` + `get_plugin(name)` + `load_plugins_from_dir(dir)` + `plugin_names()`
+- `:load-plugin /path/to/plugin.dylib` command wired in command bar and `App::handle_load_plugin()`
+- Auto-scan of `~/.config/hom/plugins/` at `App::new()` startup
+- Unknown harness names fall through to plugin registry: `:spawn mycli` works if `mycli` plugin is loaded
+- 10 unit tests in `hom-plugin` + 3 in `hom-adapters` + 3 in `hom-tui`
 
 **No remaining stubs** — all features are implemented. GhosttyBackend runtime validation requires network access during Zig build.
 
