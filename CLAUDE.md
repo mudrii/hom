@@ -324,9 +324,23 @@ hom/
 - App.poll_pending_completions() added — checks detect_completion() and timeout on pending workflow steps
 - Validation report (docs/superpowers/plans/) refreshed with current state
 
+**Resolved (April 10, 2026 — Phase 4):**
+- Cost display in status rail (F10) — total_cost polled from DB, shown as $X.XX in magenta
+- Workflow progress tracking (F9) — WorkflowProgress type replaces stringly-typed status, shows step counts
+- Terminal emulator integration tests — 5 vt100 tests covering text, colors, resize, cursor
+- Workflow template library expanded (F12) — 8 total templates (TDD, debugging, refactor, docs, parallel analysis)
+- handle_command refactored — extracted per-command handler functions
+
+**Resolved (April 10, 2026 — Phase 5 Blockers):**
+- Graceful PTY shutdown — App::shutdown() + PtyManager::kill_all() called on Ctrl-Q/:quit
+- Process crash handling — exited panes show [EXITED: N] in red, pending workflow steps notified
+- Database reliability — fail fast on DB error with clear message, --no-db for explicit opt-out
+
 **Remaining work — documentation and hardening:**
 - Run NFR benchmarks against targets (60fps, <30MB, <50ms) — benchmarks exist but not yet validated
 - GhosttyBackend wiring when libghostty-vt is published
+- Improve detect_completion() per-adapter patterns (reduce false positives)
+- End-to-end integration tests with real harness processes
 
 ## Superpowers Integration
 
