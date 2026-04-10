@@ -427,6 +427,14 @@ hom/
 - `App::new()` uses `adapter_registry.scan_default_plugin_dir()` — removes direct `hom_plugin::` reference from `hom-tui`
 - `hom-plugin` dependency removed from `hom-tui/Cargo.toml`; dep rules updated (hom-tui now correctly lists `hom-web` as a dep)
 
+**Resolved (April 11, 2026 — Round 3 correctness fixes):**
+- `App::pty_write()` helper added — routes write to `remote_ptys` or `pty_manager` via `has_pane()`; all 5 write paths (WriteToPty, Send, Broadcast, handle_pipe, SendAndWait) now correctly reach remote panes
+- `Command::Broadcast` collects `pane_ids` into a local `Vec` before the write loop — resolves borrow conflict between immutable `pane_order` iteration and mutable `pty_write` call
+- `RemotePtyManager::try_wait()` added — uses `channel.eof()` + `exit_status()`; `handle_exited_panes` dispatches to remote manager for IDs ≥1000 (was silently discarding `PaneNotFound` errors)
+- `handle_web_input` write path fixed — uses `pty_write()` for remote dispatch; uses `get_plugin()` for plugin-backed panes instead of `get(&harness_type)` ClaudeCode placeholder
+- Redundant local `use hom_core::TerminalBackend` removed from layout resize handler (already imported at top level)
+- `load_plugins_from_dir` now emits collision warning (parity with `load_plugin`)
+
 **No remaining stubs** — all features are implemented. GhosttyBackend runtime validation requires network access during Zig build.
 
 ## Superpowers Integration
