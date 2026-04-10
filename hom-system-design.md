@@ -1,6 +1,6 @@
 # HOM: Harness Orchestration Management TUI — System Design Document
 
-**Version:** 3.1 | **Date:** April 10, 2026 | **Status:** Architecture & Implementation Status
+**Version:** 3.2 | **Date:** April 10, 2026 | **Status:** Architecture & Implementation Status
 
 ---
 
@@ -552,9 +552,12 @@ Input routing:
 - **Ctrl-`** toggles between pane input and command bar
 - **Ctrl-Tab / Ctrl-Shift-Tab** cycles pane focus
 - **Ctrl-Q** quits
-- **Mouse click** on a pane focuses it
+- **Mouse click on a different pane** — focuses that pane (`Action::FocusPane`)
+- **Mouse events on the focused pane** — encoded as X10 protocol bytes (`ESC [ M <Cb> <Cx> <Cy>`) and written to the focused PTY; button/scroll events are forwarded, drag and move events are ignored
 - **Escape** in command bar returns focus to the active pane
 - **Terminal resize events** (`Event::Resize`) are handled in the main event loop — resize is propagated to all PTYs and terminal emulators
+
+Mouse capture is enabled at startup via `crossterm::execute!(EnableMouseCapture)` and disabled on teardown, so all mouse events (not just left-click) flow through to the input router.
 
 ### 4.6 Command Bar
 
@@ -726,7 +729,7 @@ Config is loaded from `~/.config/hom/config.toml`. If the user file doesn't exis
 
 [general]
 default_layout = "hsplit"
-max_scrollback = 10000
+max_scrollback = 5000
 max_panes = 8
 render_fps = 30
 
@@ -782,11 +785,21 @@ hom/
 │   ├── rules/rust-patterns.md    # Rust style, API, type, and readability patterns
 │   └── skills/rust-rig/SKILL.md  # Execution discipline: ATDD/TDD, DI, review workflow
 ├── config/
-│   └── default.toml              # Default configuration
-├── workflows/
-│   ├── code-review.yaml          # Built-in workflow templates
+│   └── default.toml              # Default configuration (compiled in via include_str!)
+├── workflows/                    # Built-in workflow templates (8 total)
+│   ├── code-review.yaml
 │   ├── plan-execute-validate.yaml
-│   └── multi-model-consensus.yaml
+│   ├── multi-model-consensus.yaml
+│   ├── test-driven-development.yaml
+│   ├── debugging.yaml
+│   ├── refactor-with-tests.yaml
+│   ├── documentation.yaml
+│   └── parallel-analysis.yaml
+├── scripts/
+│   └── seed-zig-cache.sh         # One-time runner provisioning for ghostty-backend CI
+├── .github/
+│   └── workflows/
+│       └── ci.yml                # CI: fmt, clippy, test, ghostty (self-hosted, zig label)
 │
 ├── crates/
 │   ├── hom-core/                 # Core types, traits, errors (ZERO internal deps)
@@ -945,22 +958,31 @@ async-trait = "0.1"
 | Workflow | Parallel execution | **RESOLVED** — `Arc<dyn WorkflowRuntime>` + `JoinSet` for concurrent batch execution |
 | Workflow | SendAndWait completion | **RESOLVED** — `PendingCompletion` polling via `detect_completion()` |
 | Workflow | Sideband async bridge | **RESOLVED** — SendAndWait uses `sideband.send_prompt()` for sideband-capable panes |
+| Workflow | Template library | **RESOLVED** — 8 built-in templates: code-review, plan-execute-validate, multi-model-consensus, TDD, debugging, refactor-with-tests, documentation, parallel-analysis |
 | Adapters | `parse_screen()` | **RESOLVED** — all 7 adapters have real implementations (JSONL, screen text patterns) |
 | Adapters | RPC get_events() | **RESOLVED** — non-blocking `try_lock` + 1ms timeout; parses JSON-RPC notifications |
 | Adapters | `detect_completion()` | **RESOLVED** — `last_non_empty_line()` + anchored `starts_with()` patterns per adapter; error detection added |
 | Adapters | RPC sideband | **RESOLVED** — full JSON-RPC subprocess implementation with stdin/stdout communication |
 | Adapters | HTTP sideband | **RESOLVED** — SSE event polling via GET /global/event, integration tests added |
 | Adapters | Copilot ACP | **RESOLVED** — `--acp --stdio` mode support, sideband via JSON-RPC |
-| DB | Session save/restore | **RESOLVED** — `:save`/`:restore` wired to hom_db::session CRUD |
-| DB | Cost tracking | **RESOLVED** — `log_cost()` called from workflow steps and token usage events |
+| Adapters | `build_command`/`translate_input` tests | **RESOLVED** — all 7 adapters have `build_command` (default, with model, binary override, extra args) and `translate_input` (prompt, cancel, accept, reject) tests; 91 total tests in hom-adapters |
+| DB | Session save/restore | **RESOLVED** — `:save`/`:restore` wired to `hom_db::session` CRUD with JSON serialization |
+| DB | Cost tracking | **RESOLVED** — `log_cost()` called from workflow steps and token usage events; total displayed in status rail (F10) |
+| DB | Fail-fast on error | **RESOLVED** — DB open failure exits with clear message; `--no-db` flag opts out explicitly |
 | Config | Env var expansion | **RESOLVED** — `${VAR}` interpolated in TOML values after loading |
-| Config | Keybinding config | **RESOLVED** — `KeybindingsConfig` applied to `InputRouter::from_config()` |
+| Config | Keybinding config | **RESOLVED** — `KeybindingsConfig` applied to `InputRouter::from_config()`; invalid strings warned at startup |
+| TUI | Mouse passthrough | **RESOLVED** — `encode_mouse_event()` X10-encodes scroll/button events; `EnableMouseCapture`/`DisableMouseCapture` wired in main.rs; click-to-focus still works |
+| TUI | Cost display | **RESOLVED** — total cost polled from DB and shown as `$X.XX` in status rail (F10) |
+| TUI | Workflow progress | **RESOLVED** — `WorkflowProgress` type replaces stringly-typed status; step counts shown in status rail (F9) |
 | TUI | Graceful PTY shutdown | **RESOLVED** — `App::shutdown()` + `PtyManager::kill_all()` called on Ctrl-Q/`:quit` |
-| TUI | Process crash handling | **RESOLVED** — exited panes show `[EXITED: N]` in red; pending workflow steps notified |
+| TUI | Process crash handling | **RESOLVED** — exited panes show `[EXITED: N]` in red; command bar notified; pending workflow steps unblocked |
 | TUI | Sideband health polling | **RESOLVED** — `health_check()` called every ~5s in main loop; notifies on failure |
 | TUI | AsyncPtyReader cancellation | **RESOLVED** — `abort()` method added; called in `kill_pane()` before pane removal |
-| TUI | Keybinding validation | **RESOLVED** — `validate_keybindings()` at startup; warns on invalid config strings |
+| TUI | Claude Code flickering | **DOCUMENTED** — Ink/React renderer causes 4,000-6,700 scroll events/sec in any multiplexer; headless workaround documented in `claude_code.rs` |
+| TUI | handle_command refactor | **RESOLVED** — per-command handler functions extracted; `handle_spawn`, `handle_save`, `handle_restore`, `handle_run`, etc. |
+| CI | GhosttyBackend CI job | **RESOLVED** — `ghostty` job in `.github/workflows/ci.yml` targets `[self-hosted, zig]` runner; `scripts/seed-zig-cache.sh` provisions Zig package cache |
 | Tests | E2E PTY pipeline | **RESOLVED** — spawn→read (echo), spawn→write→read (cat), PTY→Vt100→ScreenSnapshot |
+| Tests | Terminal emulator integration | **RESOLVED** — 5 vt100 tests: plain text, ANSI color, resize, cursor position, scrollback |
 | Performance | NFR benchmarks | **VALIDATED** — all 4 measurable NFRs pass: NF1 47µs (<16ms), NF2 12.8µs/1kkeys (<50ms), NF3 20.2MB (<30MB at default 5k scrollback), NF4 9.3µs (<500ms) |
 
 ---
@@ -1030,14 +1052,31 @@ async-trait = "0.1"
 
 ## 11. Future Directions
 
-**Resolved in Phase 3/4:**
-- ~~Wire session save/restore~~ → `:save`/`:restore` wired to hom-db
-- ~~Wire cost tracking~~ → `log_cost()` from workflow + token events, displayed in status rail
-- ~~Implement `parse_screen()`~~ → all 7 adapters have real implementations
-- ~~Integration-test sideband channels~~ → HTTP sideband tested, RPC implemented
-- ~~Parallel step execution~~ → `Arc<dyn WorkflowRuntime>` + JoinSet
-- ~~SendAndWait completion detection~~ → PendingCompletion polling
-- ~~Keybinding config wiring~~ → KeybindingsConfig applied to InputRouter
+**Resolved across all phases:**
+- ~~Wire session save/restore~~ → `:save`/`:restore` wired to hom-db (Phase 3)
+- ~~Wire cost tracking~~ → `log_cost()` from workflow + token events, displayed in status rail (Phase 3/4)
+- ~~Implement `parse_screen()`~~ → all 7 adapters have real implementations (Phase 3)
+- ~~Integration-test sideband channels~~ → HTTP sideband tested, RPC implemented (Phase 3)
+- ~~Parallel step execution~~ → `Arc<dyn WorkflowRuntime>` + JoinSet (Phase 3)
+- ~~SendAndWait completion detection~~ → PendingCompletion polling (Phase 3)
+- ~~Keybinding config wiring~~ → KeybindingsConfig applied to InputRouter (Phase 3)
+- ~~Workflow template library~~ → 8 built-in templates (Phase 4)
+- ~~Cost display in status rail~~ → total cost shown as `$X.XX` (Phase 4)
+- ~~Workflow progress tracking~~ → `WorkflowProgress` type + step counts in status rail (Phase 4)
+- ~~Terminal emulator integration tests~~ → 5 vt100 tests (Phase 4)
+- ~~Graceful PTY shutdown~~ → `App::shutdown()` + `PtyManager::kill_all()` (Phase 5)
+- ~~Process crash handling~~ → `[EXITED: N]` in red (Phase 5)
+- ~~Database reliability~~ → fail fast on error, `--no-db` flag (Phase 5)
+- ~~detect_completion() reliability~~ → `last_non_empty_line()` + anchored patterns (Phase 6)
+- ~~E2E PTY pipeline tests~~ → spawn/read/write/Vt100 (Phase 6)
+- ~~Process exit notification~~ → command bar notified on harness exit (Phase 7)
+- ~~Sideband health polling~~ → `health_check()` every ~5s (Phase 7)
+- ~~Keybinding validation~~ → warns on invalid config at startup (Phase 7)
+- ~~AsyncPtyReader cancellation~~ → `abort()` on pane kill (Phase 7)
+- ~~GhosttyBackend implementation~~ → `libghostty-vt 0.1.1` fully wired (Phase 7)
+- ~~Mouse passthrough~~ → X10 encoding + `EnableMouseCapture` wired (P4 session)
+- ~~Adapter build_command/translate_input tests~~ → all 7 adapters at 91 tests total (P4 session)
+- ~~GhosttyBackend CI job~~ → `[self-hosted, zig]` runner + seed script (P4 session)
 
 **Active future work:**
 1. **Linux platform validation** — `cargo check` + test suite on Linux; NF6 target not yet validated
