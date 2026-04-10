@@ -453,14 +453,25 @@ fn handle_command(
             model,
             working_dir,
             extra_args,
-            remote: _,
+            remote,
         } => {
-            let cols = terminal_size.width.saturating_sub(2);
-            let rows = terminal_size.height.saturating_sub(6);
-            match app.spawn_pane_with_opts(harness, model, working_dir, extra_args, cols, rows) {
-                Ok(id) => info!(pane_id = id, "spawned pane"),
-                Err(e) => {
-                    app.command_bar.last_error = Some(format!("{e}"));
+            if let Some(target) = remote {
+                let (cols, rows) = app.focused_pane_dimensions();
+                match app.spawn_remote_pane(harness, model, target, cols, rows) {
+                    Ok(id) => info!(pane_id = id, "remote pane spawned"),
+                    Err(e) => {
+                        app.command_bar.last_error = Some(format!("remote spawn failed: {e}"));
+                    }
+                }
+            } else {
+                let cols = terminal_size.width.saturating_sub(2);
+                let rows = terminal_size.height.saturating_sub(6);
+                match app.spawn_pane_with_opts(harness, model, working_dir, extra_args, cols, rows)
+                {
+                    Ok(id) => info!(pane_id = id, "spawned pane"),
+                    Err(e) => {
+                        app.command_bar.last_error = Some(format!("{e}"));
+                    }
                 }
             }
         }

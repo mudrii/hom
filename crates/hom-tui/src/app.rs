@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use hom_adapters::AdapterRegistry;
 use hom_core::{
-    HarnessConfig, HarnessType, HomConfig, HomResult, LayoutKind, PaneId, TerminalBackend,
+    HarnessConfig, HarnessType, HomConfig, HomResult, LayoutKind, PaneId, RemoteTarget,
+    TerminalBackend,
 };
 use hom_core::types::{McpCommand, McpRequest, McpResponse, PaneSummary};
-use hom_pty::{AsyncPtyReader, PtyManager};
+use hom_pty::{AsyncPtyReader, PtyManager, RemotePtyManager, SshAuthMethod};
 use hom_terminal::ActiveBackend;
 use hom_web::{WebCell, WebFrame, WebInput, WebPane};
 use tokio::sync::{broadcast, mpsc, mpsc as tokio_mpsc, oneshot};
@@ -53,6 +54,8 @@ pub struct App {
     pub command_bar: CommandBar,
     pub adapter_registry: AdapterRegistry,
     pub pty_manager: PtyManager,
+    /// Manages SSH-backed remote pane sessions.
+    pub remote_ptys: RemotePtyManager,
     pub should_quit: bool,
     pub workflow_progress: Option<WorkflowProgress>,
     /// Optional database handle — opened at startup when available.
@@ -84,6 +87,7 @@ impl App {
             command_bar: CommandBar::new(),
             adapter_registry: AdapterRegistry::new(),
             pty_manager: PtyManager::new(),
+            remote_ptys: RemotePtyManager::new(),
             should_quit: false,
             workflow_progress: None,
             db: None,
@@ -226,6 +230,108 @@ impl App {
         self.pane_order.push(pane_id);
 
         // Auto-focus the new pane
+        self.focused_pane = Some(pane_id);
+        self.input_router.focus_pane(pane_id);
+
+        Ok(pane_id)
+    }
+
+    /// Return a (cols, rows) size for the focused pane, or a sensible default.
+    ///
+    /// Used when spawning remote panes from the command bar before the first
+    /// render has produced real pane areas. The actual size is corrected on the
+    /// next resize event.
+    pub fn focused_pane_dimensions(&self) -> (u16, u16) {
+        (80, 24)
+    }
+
+    /// Spawn a harness pane on a remote host via SSH.
+    ///
+    /// Connects to `target` using the default SSH auth sequence (agent, then
+    /// common key files), allocates a PTY, and runs the harness command. The
+    /// resulting SSH channel is wrapped in an `AsyncPtyReader` and wired into
+    /// a `Pane` just like a local pane.
+    pub fn spawn_remote_pane(
+        &mut self,
+        harness_type: HarnessType,
+        model: Option<String>,
+        target: RemoteTarget,
+        cols: u16,
+        rows: u16,
+    ) -> HomResult<PaneId> {
+        if self.panes.len() >= self.config.general.max_panes {
+            return Err(hom_core::HomError::MaxPanesReached(
+                self.config.general.max_panes,
+            ));
+        }
+
+        let adapter = self
+            .adapter_registry
+            .get(&harness_type)
+            .ok_or(hom_core::HomError::UnsupportedHarness(harness_type))?;
+
+        let effective_dir =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+        let mut harness_config = HarnessConfig::new(harness_type, effective_dir);
+
+        let config_entry = self
+            .config
+            .harnesses
+            .get(harness_type.config_key())
+            .or_else(|| self.config.harnesses.get(harness_type.default_binary()));
+
+        if let Some(entry) = config_entry {
+            harness_config.binary_override = Some(entry.command.clone());
+            if model.is_none()
+                && let Some(ref default_model) = entry.default_model
+            {
+                harness_config.model = Some(default_model.clone());
+            }
+            harness_config.env_vars.extend(entry.env.clone());
+        }
+
+        if let Some(m) = &model {
+            harness_config = harness_config.with_model(m.clone());
+        }
+
+        let cmd_spec = adapter.build_command(&harness_config);
+        let remote_cmd = RemoteTarget::build_remote_command(&cmd_spec);
+
+        let auth_methods = SshAuthMethod::defaults();
+        let (pane_id, reader) =
+            self.remote_ptys
+                .spawn(&target, &remote_cmd, cols, rows, &auth_methods)?;
+
+        let async_reader = AsyncPtyReader::start(pane_id, reader);
+
+        let scrollback = self.config.general.max_scrollback;
+        let terminal = hom_terminal::create_terminal(cols, rows, scrollback);
+
+        let effective_model = harness_config.model.as_deref().unwrap_or("");
+        let title = format!(
+            "{} {} [{}]",
+            adapter.display_name(),
+            effective_model,
+            target
+        )
+        .trim()
+        .to_string();
+
+        let pane = Pane {
+            id: pane_id,
+            harness_type,
+            model: model.clone(),
+            title,
+            terminal,
+            pty_reader: Some(async_reader),
+            sideband: None,
+            exited: None,
+        };
+
+        self.panes.insert(pane_id, pane);
+        self.pane_order.push(pane_id);
+
         self.focused_pane = Some(pane_id);
         self.input_router.focus_pane(pane_id);
 
@@ -722,6 +828,7 @@ impl App {
                 .send(Err(hom_core::HomError::Other("shutting down".to_string())));
         }
         self.pty_manager.kill_all();
+        self.remote_ptys.kill_all();
         self.panes.clear();
         self.pane_order.clear();
         info!("app shutdown complete");
@@ -738,6 +845,13 @@ pub struct SessionPaneConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_has_remote_pty_manager() {
+        let cfg = hom_core::HomConfig::default();
+        let app = App::new(cfg);
+        assert_eq!(app.remote_ptys.active_panes().len(), 0);
+    }
 
     #[test]
     fn test_session_pane_config_roundtrip() {
