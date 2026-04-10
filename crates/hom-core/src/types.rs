@@ -213,3 +213,45 @@ pub enum LayoutKind {
     Grid,
     Tabbed,
 }
+
+// ── MCP server ────────────────────────────────────────────────────────
+
+/// A command sent from the MCP server to the TUI app, with a channel to receive
+/// the result. The app processes this in its event loop and sends back a McpResponse.
+#[derive(Debug)]
+pub struct McpRequest {
+    pub command: McpCommand,
+    pub reply: tokio::sync::oneshot::Sender<McpResponse>,
+}
+
+/// The action the MCP server wants the app to perform.
+#[derive(Debug)]
+pub enum McpCommand {
+    SpawnPane { harness: String, model: Option<String> },
+    SendToPane { pane_id: String, text: String },
+    RunWorkflow { path: String, vars: std::collections::HashMap<String, String> },
+    ListPanes,
+    GetPaneOutput { pane_id: String, lines: usize },
+    KillPane { pane_id: String },
+}
+
+/// The result the app sends back to the MCP server.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub enum McpResponse {
+    SpawnPane { pane_id: String },
+    SendToPane { ok: bool },
+    RunWorkflow { workflow_id: String },
+    ListPanes { panes: Vec<PaneSummary> },
+    GetPaneOutput { lines: Vec<String> },
+    KillPane { ok: bool },
+    Error { error: String },
+}
+
+/// Summary of a single pane returned by list_panes.
+#[derive(Debug, serde::Serialize)]
+pub struct PaneSummary {
+    pub pane_id: String,
+    pub harness: String,
+    pub status: String,
+}
