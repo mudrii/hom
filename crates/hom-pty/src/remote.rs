@@ -48,10 +48,16 @@ pub struct RemoteSession {
     _tcp: TcpStream,
 }
 
-// SAFETY: RemoteSession is only accessed from the single-threaded TUI event loop.
-// No concurrent access to the ssh2 session or channel ever occurs.
-// ssh2 types are not Send in their public API; this impl is sound only because
-// the event loop guarantees exclusive access.
+// SAFETY: `RemoteSession` is used from the single-threaded TUI event loop for writes
+// and control (write_to, resize, send_eof). The cloned channel handle passed to
+// `AsyncPtyReader` is used for reads only in a spawn_blocking task.
+//
+// `ssh2::Channel` is backed by an `Arc`-protected libssh2 channel handle. The read
+// and write paths use separate libssh2 internal buffers. Concurrent read (reader task)
+// and write (event loop) on separate halves is the intended usage pattern.
+//
+// Known limitation: libssh2 is not documented as fully thread-safe. If this causes
+// issues in practice, move to a Mutex<ssh2::Channel> shared between reader and writer.
 unsafe impl Send for RemoteSession {}
 
 /// Manages all active remote PTY sessions.
@@ -96,9 +102,10 @@ impl RemotePtyManager {
 
         let mut session = Session::new()
             .map_err(|e| HomError::PtyError(format!("SSH session create failed: {e}")))?;
-        session.set_tcp_stream(tcp.try_clone().map_err(|e| {
-            HomError::PtyError(format!("TCP clone failed: {e}"))
-        })?);
+        session.set_tcp_stream(
+            tcp.try_clone()
+                .map_err(|e| HomError::PtyError(format!("TCP clone failed: {e}")))?,
+        );
         session
             .handshake()
             .map_err(|e| HomError::PtyError(format!("SSH handshake failed: {e}")))?;
@@ -163,9 +170,7 @@ impl RemotePtyManager {
                             debug!("SSH agent identities() failed: {e}");
                             vec![]
                         }) {
-                            if agent.userauth(user, &identity).is_ok()
-                                && session.authenticated()
-                            {
+                            if agent.userauth(user, &identity).is_ok() && session.authenticated() {
                                 return true;
                             }
                         }
@@ -173,9 +178,7 @@ impl RemotePtyManager {
                 }
                 SshAuthMethod::KeyFile(path) => {
                     if path.exists() {
-                        if session
-                            .userauth_pubkey_file(user, None, path, None)
-                            .is_ok()
+                        if session.userauth_pubkey_file(user, None, path, None).is_ok()
                             && session.authenticated()
                         {
                             return true;
@@ -233,6 +236,13 @@ impl RemotePtyManager {
 
         info!(pane_id, "killed remote PTY");
         Ok(())
+    }
+
+    /// Remove a pane by ID, sending EOF and dropping the session.
+    ///
+    /// Alias for [`kill`](Self::kill) — use whichever name reads better at the call site.
+    pub fn kill_pane(&mut self, pane_id: PaneId) -> HomResult<()> {
+        self.kill(pane_id)
     }
 
     /// Close all remote sessions. Called during App::shutdown().
