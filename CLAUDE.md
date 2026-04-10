@@ -390,6 +390,16 @@ hom/
 - WebServer::run() returns anyhow::Result<()> — bind/serve errors propagated and logged, not panicked
 - `hom --web` or `hom --web --web-port 8080`
 
+**Resolved (April 10, 2026 — Remote pane support):**
+- `RemoteTarget` added to `hom-core/src/types.rs` — parse `user@host[:port]`, `shell_quote()`, `build_remote_command()`
+- `PaneKind::Local` / `PaneKind::Remote(RemoteTarget)` discriminant added to `hom-core`
+- `RemotePtyManager` in `crates/hom-pty/src/remote.rs` — SSH session + channel lifecycle via `ssh2 = "0.9"`
+- `SshAuthMethod::defaults()` tries SSH agent then `~/.ssh/id_ed25519` then `~/.ssh/id_rsa`
+- All remote command args are individually shell-quoted via `RemoteTarget::shell_quote()` before SSH exec
+- `:spawn <harness> --remote user@host[:port]` parsed in command bar; routes to `App::spawn_remote_pane()`
+- `App::shutdown()` calls `remote_ptys.kill_all()` for graceful cleanup
+- 7 unit tests for `RemotePtyManager` + 3 for command bar `--remote` flag parsing
+
 **No remaining stubs** — all features are implemented. GhosttyBackend runtime validation requires network access during Zig build.
 
 ## Superpowers Integration
