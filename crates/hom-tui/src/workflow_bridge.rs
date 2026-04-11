@@ -5,13 +5,16 @@
 //! requests through a `tokio::sync::mpsc` channel and awaiting responses on
 //! per-request `oneshot` channels.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
+use uuid::Uuid;
 
 use hom_core::{HomError, HomResult, PaneId};
+use hom_workflow::WorkflowDef;
 use hom_workflow::WorkflowRuntime;
 
 /// A command sent from the workflow executor to the TUI event loop.
@@ -40,6 +43,50 @@ pub enum WorkflowRequest {
 
 /// Handle held by the TUI event loop to receive workflow requests.
 pub type WorkflowRequestRx = mpsc::UnboundedReceiver<WorkflowRequest>;
+
+/// Request to start a workflow executor task from the TUI side.
+#[derive(Debug)]
+pub struct WorkflowLaunchRequest {
+    pub workflow_id: String,
+    pub definition_path: String,
+    pub def: WorkflowDef,
+    pub variables: HashMap<String, String>,
+}
+
+/// Receiver held by the main loop for workflow launch requests.
+pub type WorkflowLaunchRx = mpsc::UnboundedReceiver<WorkflowLaunchRequest>;
+
+/// Handle used by the TUI to queue workflow launches.
+#[derive(Clone)]
+pub struct WorkflowLauncher {
+    tx: mpsc::UnboundedSender<WorkflowLaunchRequest>,
+}
+
+impl WorkflowLauncher {
+    pub fn new() -> (Self, WorkflowLaunchRx) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { tx }, rx)
+    }
+
+    /// Queue a workflow launch and return the assigned workflow ID.
+    pub fn launch(
+        &self,
+        def: WorkflowDef,
+        variables: HashMap<String, String>,
+        definition_path: String,
+    ) -> HomResult<String> {
+        let workflow_id = Uuid::new_v4().to_string();
+        self.tx
+            .send(WorkflowLaunchRequest {
+                workflow_id: workflow_id.clone(),
+                definition_path,
+                def,
+                variables,
+            })
+            .map_err(|_| HomError::Other("workflow launch channel closed".to_string()))?;
+        Ok(workflow_id)
+    }
+}
 
 /// The `WorkflowRuntime` implementor — holds a channel sender to the TUI.
 ///

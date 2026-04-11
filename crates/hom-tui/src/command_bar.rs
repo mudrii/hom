@@ -516,10 +516,9 @@ mod tests {
 
     #[test]
     fn load_plugin_parses_absolute_path() {
-        let cmd = CommandBar::parse_command(
-            "load-plugin /home/user/.config/hom/plugins/mycli.dylib",
-        )
-        .unwrap();
+        let cmd =
+            CommandBar::parse_command("load-plugin /home/user/.config/hom/plugins/mycli.dylib")
+                .unwrap();
         match cmd {
             Command::LoadPlugin { path } => {
                 assert_eq!(

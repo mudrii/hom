@@ -7,5 +7,5 @@ pub mod frame;
 pub mod server;
 pub mod viewer;
 
-pub use frame::{WebCell, WebFrame, WebInput, WebPane};
+pub use frame::{DEFAULT_BG_SENTINEL, DEFAULT_FG_SENTINEL, WebCell, WebFrame, WebInput, WebPane};
 pub use server::WebServer;

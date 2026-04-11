@@ -28,12 +28,12 @@ HOM is a Rust-based TUI terminal multiplexer and orchestrator for 7 AI coding ag
 
 ## Architecture
 
-7-crate Rust workspace:
+10-crate Rust workspace:
 
 | Crate | Purpose |
 |-------|---------|
 | `hom-core` | Shared types, `TerminalBackend` trait, `HarnessAdapter` trait, `SidebandChannel` trait, config, errors |
-| `hom-terminal` | Terminal emulation — `Vt100Backend` (working), `GhosttyBackend` (stubbed, behind feature flag) |
+| `hom-terminal` | Terminal emulation — `GhosttyBackend` (default) with `Vt100Backend` opt-in fallback |
 | `hom-pty` | `PtyManager` (spawn/read/write/resize/kill) + `AsyncPtyReader` (tokio channel bridge) |
 | `hom-adapters` | All 7 harness adapters + `AdapterRegistry` + HTTP/RPC sideband channels |
 | `hom-workflow` | YAML parser, petgraph DAG, step executor with retry/timeout/templating, condition evaluator |
@@ -238,7 +238,7 @@ hom/
 ## Implementation Status
 
 **Implemented** — compiles clean with `cargo check`, zero warnings
-- All 7 crates with real types, traits, and implementations
+- All 10 crates with real types, traits, and implementations
 - vt100 backend fully wired to TerminalBackend trait
 - PtyManager with spawn/read/write/resize/kill
 - AsyncPtyReader with tokio channel bridge
@@ -266,7 +266,7 @@ hom/
 - Criterion benchmarks for terminal render cycle (benches/terminal_render.rs)
 
 **Remaining work — stubs (compiles but placeholder):**
-- GhosttyBackend in ghostty.rs — all methods are TODO (requires Zig ≥0.15.x + libghostty-vt). Detailed wiring steps documented.
+- No remaining stubs in the Rust workspace. GhosttyBackend, MCP, web UI, remote panes, and plugin loading are all wired.
 
 **Resolved (April 10, 2026 — Phase 3):**
 - Workflow parallel execution — Arc<dyn WorkflowRuntime> + JoinSet for concurrent batch steps
@@ -334,7 +334,7 @@ hom/
 **Resolved (April 10, 2026 — Phase 4):**
 - Cost display in status rail (F10) — total_cost polled from DB, shown as $X.XX in magenta
 - Workflow progress tracking (F9) — WorkflowProgress type replaces stringly-typed status, shows step counts
-- Terminal emulator integration tests — 5 vt100 tests covering text, colors, resize, cursor
+- Terminal emulator integration tests — 6 vt100 tests covering text, colors, resize, cursor, scroll, attrs
 - Workflow template library expanded (F12) — 8 total templates (TDD, debugging, refactor, docs, parallel analysis)
 - handle_command refactored — extracted per-command handler functions
 
@@ -365,7 +365,7 @@ hom/
 - GhosttyBackend fully implemented — `libghostty-vt 0.1.1` wired, `Terminal::new/vt_write/resize/grid_ref/cursor_x/y/title` mapped to `TerminalBackend` trait
 - `unsafe impl Send + Sync` with documented safety invariant (single-threaded event loop access)
 - `map_style_color()` maps Ghostty palette/RGB/None to `TermColor`; underline/bold/italic/dim/blink/inverse/strikethrough all mapped
-- 7 tests added (dimensions, plain text, resize, cursor, title, ANSI color, color mapping)
+- 8 tests added (dimensions, plain text, resize, cursor, title, ANSI color, color mapping, attrs)
 - `libghostty-vt-sys` build requires Zig network access at first build (`deps.files.ghostty.org`); not validatable in offline environments
 
 **Resolved (April 10, 2026 — P4 Session):**
@@ -383,12 +383,12 @@ hom/
 - Six tools: spawn_pane, send_to_pane, run_workflow, list_panes, get_pane_output, kill_pane
 - `--mcp` flag spawns McpServer as a tokio task alongside the TUI
 - McpRequest/McpResponse types in hom-core; channel-based IPC with App
-- RunWorkflow via MCP returns a diagnostic error (WorkflowBridge lives in main.rs — a future refactor can move it into App)
+- RunWorkflow via MCP is wired through the workflow launch channel and returns a real `workflow_id`
 
 **Resolved (April 11, 2026 — Web UI):**
 - hom-web crate — axum 0.8 WebSocket server on localhost:4242 (--web-port to override)
 - Canvas2D cell rendering in browser — XSS-safe (fillText, no innerHTML); full ANSI 256-color palette
-- Broadcast WebFrame (serialised ScreenSnapshot) to all connected WebSocket clients after each tick
+- Broadcast `WebFrame { ts, panes }` to all connected WebSocket clients after each tick
 - Browser keystrokes forwarded to target pane via WebInput channel (pane_id-routed, not just focused pane)
 - WebServer::run() returns anyhow::Result<()> — bind/serve errors propagated and logged, not panicked
 - `hom --web` or `hom --web --web-port 8080`
@@ -401,7 +401,7 @@ hom/
 - All remote command args are individually shell-quoted via `RemoteTarget::shell_quote()` before SSH exec
 - `:spawn <harness> --remote user@host[:port]` parsed in command bar; routes to `App::spawn_remote_pane()`
 - `App::shutdown()` calls `remote_ptys.kill_all()` for graceful cleanup
-- 7 unit tests for `RemotePtyManager` + 3 for command bar `--remote` flag parsing
+- 7 unit tests for `RemotePtyManager` + 3 for command bar `--remote` flag parsing; remote panes now forward configured environment variables via SSH `setenv`
 
 **Resolved (April 10, 2026 — Plugin system):**
 - `crates/hom-plugin/` new crate — stable C ABI vtable (`HomPluginVtable`, ABI v1)

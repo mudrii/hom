@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+/// Sentinel color value for the terminal's default foreground.
+pub const DEFAULT_FG_SENTINEL: u32 = 0x01_00_00_00;
+/// Sentinel color value for the terminal's default background.
+pub const DEFAULT_BG_SENTINEL: u32 = 0x01_00_00_01;
+
 /// A single cell in a pane's screen buffer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WebCell {
     pub ch: char,
-    pub fg: u32, // RRGGBB packed, 0xFFFFFF = terminal default
+    pub fg: u32, // RRGGBB packed or DEFAULT_*_SENTINEL
     pub bg: u32,
     pub bold: bool,
     pub italic: bool,
@@ -15,8 +20,8 @@ impl Default for WebCell {
     fn default() -> Self {
         WebCell {
             ch: ' ',
-            fg: 0xFF_FF_FF,
-            bg: 0x00_00_00,
+            fg: DEFAULT_FG_SENTINEL,
+            bg: DEFAULT_BG_SENTINEL,
             bold: false,
             italic: false,
             underline: false,
@@ -72,6 +77,8 @@ mod tests {
     fn webcell_default_is_space() {
         let cell = WebCell::default();
         assert_eq!(cell.ch, ' ');
+        assert_eq!(cell.fg, DEFAULT_FG_SENTINEL);
+        assert_eq!(cell.bg, DEFAULT_BG_SENTINEL);
         assert!(!cell.bold);
     }
 

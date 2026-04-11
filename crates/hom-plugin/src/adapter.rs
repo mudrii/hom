@@ -3,12 +3,15 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::path::{Path, PathBuf};
 
 use hom_core::{
-    CommandSpec, CompletionStatus, HarnessCapabilities, HarnessConfig, HarnessEvent, HarnessType,
-    OrchestratorCommand, ScreenSnapshot, SidebandChannel,
+    Cell, CellAttributes, CommandSpec, CompletionStatus, CursorState, HarnessCapabilities,
+    HarnessConfig, HarnessEvent, HarnessType, OrchestratorCommand, ScreenSnapshot, SidebandChannel,
+    TermColor,
 };
 use libloading::Library;
+use serde::Serialize;
 use tracing::warn;
 
 use crate::ffi::{HomInputKind, HomPluginVtable};
@@ -129,20 +132,174 @@ impl PluginAdapter {
         Some(result)
     }
 
-    /// Serialize a `ScreenSnapshot` to a JSON string for the plugin boundary.
-    ///
-    /// `ScreenSnapshot` does not derive `Serialize`, so we build a minimal
-    /// representation using the text content and dimensions.
-    fn snapshot_to_json(screen: &ScreenSnapshot) -> String {
-        let text = screen.text();
-        let last_line = screen.last_non_empty_line();
-        serde_json::json!({
-            "text": text,
-            "last_line": last_line,
-            "cols": screen.cols,
-            "rows": screen.num_rows,
+    fn command_spec_from_json(
+        plugin_name: &str,
+        json: &str,
+        fallback_working_dir: &Path,
+    ) -> Option<CommandSpec> {
+        let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+        let program = value["program"]
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| plugin_name.to_string());
+        let args = value["args"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let env = value["env"]
+            .as_object()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|(key, value)| value.as_str().map(|v| (key.clone(), v.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let working_dir = value["working_dir"]
+            .as_str()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| fallback_working_dir.to_path_buf());
+
+        Some(CommandSpec {
+            program,
+            args,
+            env,
+            working_dir,
         })
-        .to_string()
+    }
+
+    /// Serialize a `ScreenSnapshot` to a JSON string for the plugin boundary.
+    fn snapshot_to_json(screen: &ScreenSnapshot) -> String {
+        #[derive(Serialize)]
+        struct SerializableScreenSnapshot {
+            rows: Vec<Vec<SerializableCell>>,
+            cols: u16,
+            num_rows: u16,
+            cursor: SerializableCursorState,
+        }
+
+        #[derive(Serialize)]
+        struct SerializableCell {
+            character: char,
+            fg: SerializableColor,
+            bg: SerializableColor,
+            attrs: SerializableCellAttributes,
+        }
+
+        #[derive(Serialize)]
+        struct SerializableCursorState {
+            row: u16,
+            col: u16,
+            visible: bool,
+        }
+
+        #[derive(Serialize)]
+        struct SerializableCellAttributes {
+            bold: bool,
+            italic: bool,
+            underline: bool,
+            dim: bool,
+            strikethrough: bool,
+            inverse: bool,
+            blink: bool,
+        }
+
+        #[derive(Serialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum SerializableColor {
+            Default,
+            Named { name: &'static str },
+            Indexed { value: u8 },
+            Rgb { r: u8, g: u8, b: u8 },
+        }
+
+        fn color_to_json(color: &TermColor) -> SerializableColor {
+            match color {
+                TermColor::Default => SerializableColor::Default,
+                TermColor::Black => SerializableColor::Named { name: "black" },
+                TermColor::Red => SerializableColor::Named { name: "red" },
+                TermColor::Green => SerializableColor::Named { name: "green" },
+                TermColor::Yellow => SerializableColor::Named { name: "yellow" },
+                TermColor::Blue => SerializableColor::Named { name: "blue" },
+                TermColor::Magenta => SerializableColor::Named { name: "magenta" },
+                TermColor::Cyan => SerializableColor::Named { name: "cyan" },
+                TermColor::White => SerializableColor::Named { name: "white" },
+                TermColor::BrightBlack => SerializableColor::Named {
+                    name: "bright_black",
+                },
+                TermColor::BrightRed => SerializableColor::Named { name: "bright_red" },
+                TermColor::BrightGreen => SerializableColor::Named {
+                    name: "bright_green",
+                },
+                TermColor::BrightYellow => SerializableColor::Named {
+                    name: "bright_yellow",
+                },
+                TermColor::BrightBlue => SerializableColor::Named {
+                    name: "bright_blue",
+                },
+                TermColor::BrightMagenta => SerializableColor::Named {
+                    name: "bright_magenta",
+                },
+                TermColor::BrightCyan => SerializableColor::Named {
+                    name: "bright_cyan",
+                },
+                TermColor::BrightWhite => SerializableColor::Named {
+                    name: "bright_white",
+                },
+                TermColor::Indexed(value) => SerializableColor::Indexed { value: *value },
+                TermColor::Rgb(r, g, b) => SerializableColor::Rgb {
+                    r: *r,
+                    g: *g,
+                    b: *b,
+                },
+            }
+        }
+
+        fn attrs_to_json(attrs: &CellAttributes) -> SerializableCellAttributes {
+            SerializableCellAttributes {
+                bold: attrs.bold,
+                italic: attrs.italic,
+                underline: attrs.underline,
+                dim: attrs.dim,
+                strikethrough: attrs.strikethrough,
+                inverse: attrs.inverse,
+                blink: attrs.blink,
+            }
+        }
+
+        fn cell_to_json(cell: &Cell) -> SerializableCell {
+            SerializableCell {
+                character: cell.character,
+                fg: color_to_json(&cell.fg),
+                bg: color_to_json(&cell.bg),
+                attrs: attrs_to_json(&cell.attrs),
+            }
+        }
+
+        fn cursor_to_json(cursor: &CursorState) -> SerializableCursorState {
+            SerializableCursorState {
+                row: cursor.row,
+                col: cursor.col,
+                visible: cursor.visible,
+            }
+        }
+
+        serde_json::to_string(&SerializableScreenSnapshot {
+            rows: screen
+                .rows
+                .iter()
+                .map(|row| row.iter().map(cell_to_json).collect())
+                .collect(),
+            cols: screen.cols,
+            num_rows: screen.num_rows,
+            cursor: cursor_to_json(&screen.cursor),
+        })
+        .unwrap_or_else(|_| "{\"rows\":[],\"cols\":0,\"num_rows\":0,\"cursor\":{\"row\":0,\"col\":0,\"visible\":true}}".to_string())
     }
 }
 
@@ -200,35 +357,16 @@ impl hom_core::HarnessAdapter for PluginAdapter {
             };
         };
 
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
-            warn!(plugin = %self.plugin_name(), json, "build_command returned invalid JSON");
-            return CommandSpec {
-                program: self.plugin_name().to_string(),
-                args: Vec::new(),
-                env: HashMap::new(),
-                working_dir: config.working_dir.clone(),
-            };
-        };
-
-        let program = value["program"]
-            .as_str()
-            .map(String::from)
-            .unwrap_or_else(|| self.plugin_name());
-        let args = value["args"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
+        Self::command_spec_from_json(&self.plugin_name(), &json, &config.working_dir)
+            .unwrap_or_else(|| {
+                warn!(plugin = %self.plugin_name(), json, "build_command returned invalid JSON");
+                CommandSpec {
+                    program: self.plugin_name().to_string(),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                    working_dir: config.working_dir.clone(),
+                }
             })
-            .unwrap_or_default();
-
-        CommandSpec {
-            program,
-            args,
-            env: HashMap::new(),
-            working_dir: config.working_dir.clone(),
-        }
     }
 
     fn translate_input(&self, command: &OrchestratorCommand) -> Vec<u8> {
@@ -344,6 +482,7 @@ impl hom_core::HarnessAdapter for PluginAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hom_core::{Cell, CellAttributes, CursorState, TermColor};
 
     #[test]
     fn decode_hex_empty_string_gives_empty_bytes() {
@@ -363,5 +502,58 @@ mod tests {
     #[test]
     fn decode_hex_odd_length_is_empty() {
         assert_eq!(decode_hex_bytes("abc"), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn command_spec_from_json_preserves_env_and_working_dir() {
+        let json = r#"{
+            "program": "demo",
+            "args": ["--flag", "value"],
+            "env": {"FOO": "bar", "BAZ": "qux"},
+            "working_dir": "/tmp/plugin-cwd"
+        }"#;
+
+        let spec = PluginAdapter::command_spec_from_json("fallback", json, Path::new(".")).unwrap();
+        assert_eq!(spec.program, "demo");
+        assert_eq!(spec.args, vec!["--flag", "value"]);
+        assert_eq!(spec.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(spec.working_dir, PathBuf::from("/tmp/plugin-cwd"));
+    }
+
+    #[test]
+    fn snapshot_to_json_contains_full_screen_shape() {
+        let snapshot = ScreenSnapshot {
+            rows: vec![vec![Cell {
+                character: 'A',
+                fg: TermColor::BrightGreen,
+                bg: TermColor::Rgb(1, 2, 3),
+                attrs: CellAttributes {
+                    bold: true,
+                    italic: false,
+                    underline: true,
+                    dim: false,
+                    strikethrough: false,
+                    inverse: false,
+                    blink: false,
+                },
+            }]],
+            cols: 1,
+            num_rows: 1,
+            cursor: CursorState {
+                row: 0,
+                col: 0,
+                visible: true,
+            },
+        };
+
+        let json = PluginAdapter::snapshot_to_json(&snapshot);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["cols"], 1);
+        assert_eq!(value["num_rows"], 1);
+        assert_eq!(value["rows"][0][0]["character"], "A");
+        assert_eq!(value["rows"][0][0]["fg"]["kind"], "named");
+        assert_eq!(value["rows"][0][0]["fg"]["name"], "bright_green");
+        assert_eq!(value["rows"][0][0]["bg"]["kind"], "rgb");
+        assert_eq!(value["cursor"]["visible"], true);
     }
 }

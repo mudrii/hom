@@ -91,6 +91,7 @@ impl RemotePtyManager {
         &mut self,
         target: &RemoteTarget,
         command: &str,
+        env: &std::collections::HashMap<String, String>,
         cols: u16,
         rows: u16,
         auth_methods: &[SshAuthMethod],
@@ -128,6 +129,12 @@ impl RemotePtyManager {
                 Some((cols as u32, rows as u32, 0, 0)),
             )
             .map_err(|e| HomError::PtyError(format!("SSH request_pty failed: {e}")))?;
+
+        for (key, value) in env {
+            channel
+                .setenv(key, value)
+                .map_err(|e| HomError::PtyError(format!("SSH setenv {key} failed: {e}")))?;
+        }
 
         // ssh2::Channel::exec() sends the command over the SSH protocol channel.
         // The command string comes from RemoteTarget::build_remote_command() which

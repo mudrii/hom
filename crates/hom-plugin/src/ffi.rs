@@ -86,7 +86,9 @@ pub struct HomPluginVtable {
 
     /// Parse the terminal screen and return structured events.
     ///
-    /// `screen_json`: null-terminated UTF-8 JSON matching `ScreenSnapshot` schema.
+    /// `screen_json`: null-terminated UTF-8 JSON with the same fields as
+    /// `ScreenSnapshot`:
+    /// `{"rows":[[{"character":"x","fg":{"kind":"default"|...},"bg":...,"attrs":{...}}]],"cols":80,"num_rows":24,"cursor":{"row":0,"col":0,"visible":true}}`
     ///
     /// Returns heap-allocated JSON array: `[{"type": "TaskCompleted", "summary": "done"}, ...]`
     /// Caller must free with `free_str`.

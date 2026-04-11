@@ -65,7 +65,7 @@ async fn test_async_reader_feeds_terminal() {
 
     assert!(!bytes.is_empty(), "expected bytes from PTY, got none");
 
-    let mut terminal = create_terminal(80, 24, 500);
+    let mut terminal = create_terminal(80, 24, 500).unwrap();
     terminal.process(&bytes);
 
     let snap = terminal.screen_snapshot();
@@ -104,7 +104,7 @@ async fn test_write_read_roundtrip_through_terminal() {
 
     assert!(!bytes.is_empty(), "expected bytes from PTY, got none");
 
-    let mut terminal = create_terminal(80, 24, 500);
+    let mut terminal = create_terminal(80, 24, 500).unwrap();
     terminal.process(&bytes);
 
     let snap = terminal.screen_snapshot();
@@ -141,7 +141,7 @@ async fn test_ansi_color_survives_pipeline() {
 
     assert!(!bytes.is_empty(), "expected bytes from PTY, got none");
 
-    let mut terminal = create_terminal(80, 24, 500);
+    let mut terminal = create_terminal(80, 24, 500).unwrap();
     terminal.process(&bytes);
 
     let snap = terminal.screen_snapshot();

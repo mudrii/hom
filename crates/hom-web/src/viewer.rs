@@ -22,10 +22,11 @@ pub const VIEWER_HTML: &str = r#"<!DOCTYPE html>
 const CELL_W = 9, CELL_H = 16;
 const FONT = '13px monospace';
 const DEFAULT_FG = '#c9d1d9', DEFAULT_BG = '#161b22';
+const DEFAULT_FG_SENTINEL = 0x01000000, DEFAULT_BG_SENTINEL = 0x01000001;
 
 function toHex(n) {
-  if (n === 0xFFFFFF) return DEFAULT_FG;
-  if (n === 0x000000) return DEFAULT_BG;
+  if (n === DEFAULT_FG_SENTINEL) return DEFAULT_FG;
+  if (n === DEFAULT_BG_SENTINEL) return DEFAULT_BG;
   return '#' + n.toString(16).padStart(6, '0');
 }
 

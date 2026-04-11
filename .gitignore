@@ -2,6 +2,13 @@
 *.swp
 *.swo
 .DS_Store
+.local/
+tmp/
+.env
+.env.local
+.env.*.local
+personal-notes/
+notes/private/
 
 # Homebrew formula is rendered by scripts/update-homebrew.sh — commit only the template
 Formula/hom.rb
