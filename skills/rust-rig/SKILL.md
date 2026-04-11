@@ -75,7 +75,7 @@ Run these commands as appropriate to the affected scope:
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo nextest run` or `cargo test`
 - `cargo test --all-features`
-- `cargo test --no-default-features`
+- `cargo test --no-default-features --features vt100-backend`
 - `cargo test --doc`
 - `cargo doc --no-deps`
 </verification>

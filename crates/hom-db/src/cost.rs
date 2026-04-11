@@ -54,3 +54,49 @@ pub async fn cost_by_harness(pool: &SqlitePool) -> HomResult<Vec<(String, f64)>>
 
     Ok(rows)
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::HomDb;
+
+    async fn open_temp_db() -> HomDb {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("hom.sqlite");
+        std::mem::forget(temp);
+        HomDb::open(db_path.to_str().unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn total_cost_is_zero_for_empty_log() {
+        let db = open_temp_db().await;
+
+        assert_eq!(total_cost(db.pool()).await.unwrap(), 0.0);
+        assert!(cost_by_harness(db.pool()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn log_cost_aggregates_totals_and_groups_by_harness() {
+        let db = open_temp_db().await;
+
+        log_cost(db.pool(), 1, "claude", Some("opus"), 10, 20, 1.25)
+            .await
+            .unwrap();
+        log_cost(db.pool(), 2, "codex", Some("5.4"), 30, 40, 2.50)
+            .await
+            .unwrap();
+        log_cost(db.pool(), 3, "claude", None, 5, 6, 0.75)
+            .await
+            .unwrap();
+
+        assert!((total_cost(db.pool()).await.unwrap() - 4.5).abs() < f64::EPSILON);
+
+        let grouped = cost_by_harness(db.pool()).await.unwrap();
+        assert_eq!(
+            grouped,
+            vec![("codex".to_string(), 2.5), ("claude".to_string(), 2.0),]
+        );
+    }
+}

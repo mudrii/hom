@@ -89,7 +89,7 @@ Detailed conventions that complement `CLAUDE.md`. The rust-rig skill owns proces
 ## Error Handling
 
 - Return `Result<T, E>` with specific error types — never `Result<T, String>`
-- Use `thiserror` for library errors; `anyhow` only at binary boundaries
+- Prefer `thiserror` for library and domain errors; reserve `anyhow` for binary, orchestration, or outer integration entrypoints
 - Add context to errors: what operation, what input, why it failed
 - No casual `unwrap()` or `expect()` in production — use `?`, `ok_or_else()`, or `map_err()`
 - `Option` only when absence is the whole story — not as a substitute for `Result`

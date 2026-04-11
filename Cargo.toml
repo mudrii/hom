@@ -68,8 +68,9 @@ backoff = { version = "0.4", features = ["tokio"] }
 # Storage
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
-# HTTP client (OpenCode sideband) — use rustls to avoid native OpenSSL dep
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# HTTP client (OpenCode sideband) — use rustls without reqwest's aws-lc default
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # Web server (hom-web)
 axum = { version = "0.8", features = ["ws"] }
@@ -106,6 +107,7 @@ categories.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
 
 [[bench]]
 name = "terminal_render"

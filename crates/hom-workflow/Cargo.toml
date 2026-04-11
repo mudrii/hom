@@ -17,6 +17,5 @@ minijinja.workspace = true
 backoff.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-anyhow.workspace = true
 uuid.workspace = true
 chrono.workspace = true

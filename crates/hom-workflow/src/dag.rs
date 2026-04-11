@@ -97,3 +97,82 @@ impl WorkflowDag {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::StepDef;
+
+    fn step(id: &str, depends_on: &[&str]) -> StepDef {
+        StepDef {
+            id: id.to_string(),
+            harness: "claude".to_string(),
+            model: None,
+            prompt: format!("run {id}"),
+            depends_on: depends_on.iter().map(|dep| dep.to_string()).collect(),
+            timeout: None,
+            condition: None,
+            retry: None,
+            on_failure: None,
+        }
+    }
+
+    #[test]
+    fn dag_reports_roots_and_ready_steps() {
+        let dag = WorkflowDag::from_steps(&[
+            step("plan", &[]),
+            step("impl", &["plan"]),
+            step("review", &["plan"]),
+            step("ship", &["impl", "review"]),
+        ])
+        .unwrap();
+
+        let mut roots = dag.roots();
+        roots.sort();
+        assert_eq!(roots, vec!["plan".to_string()]);
+
+        let mut initial_ready = dag.ready_steps(&[]);
+        initial_ready.sort();
+        assert_eq!(initial_ready, vec!["plan".to_string()]);
+
+        let mut after_plan = dag.ready_steps(&["plan".to_string()]);
+        after_plan.sort();
+        assert_eq!(after_plan, vec!["impl".to_string(), "review".to_string()]);
+    }
+
+    #[test]
+    fn dag_rejects_unknown_dependency() {
+        let err = WorkflowDag::from_steps(&[step("impl", &["missing"])])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("unknown step 'missing'"));
+    }
+
+    #[test]
+    fn dag_rejects_cycles() {
+        let err = WorkflowDag::from_steps(&[step("a", &["b"]), step("b", &["a"])])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("cycle") || err.contains("Cycle"));
+    }
+
+    #[test]
+    fn topo_order_places_dependencies_before_dependents() {
+        let dag = WorkflowDag::from_steps(&[
+            step("plan", &[]),
+            step("impl", &["plan"]),
+            step("review", &["impl"]),
+        ])
+        .unwrap();
+
+        let order = dag.topo_order().unwrap();
+        let plan_idx = order.iter().position(|id| id == "plan").unwrap();
+        let impl_idx = order.iter().position(|id| id == "impl").unwrap();
+        let review_idx = order.iter().position(|id| id == "review").unwrap();
+
+        assert!(plan_idx < impl_idx);
+        assert!(impl_idx < review_idx);
+    }
+}

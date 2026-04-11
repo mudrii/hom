@@ -27,3 +27,36 @@ pub fn term_color_to_ratatui(color: TermColor) -> ratatui::style::Color {
         TermColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::Color;
+
+    use super::*;
+
+    #[test]
+    fn maps_named_and_bright_colors() {
+        assert_eq!(term_color_to_ratatui(TermColor::Default), Color::Reset);
+        assert_eq!(
+            term_color_to_ratatui(TermColor::BrightBlack),
+            Color::DarkGray
+        );
+        assert_eq!(term_color_to_ratatui(TermColor::BrightWhite), Color::White);
+        assert_eq!(
+            term_color_to_ratatui(TermColor::BrightCyan),
+            Color::LightCyan
+        );
+    }
+
+    #[test]
+    fn maps_indexed_and_rgb_colors() {
+        assert_eq!(
+            term_color_to_ratatui(TermColor::Indexed(42)),
+            Color::Indexed(42)
+        );
+        assert_eq!(
+            term_color_to_ratatui(TermColor::Rgb(1, 2, 3)),
+            Color::Rgb(1, 2, 3)
+        );
+    }
+}

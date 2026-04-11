@@ -46,7 +46,9 @@ Before writing any code, answer these questions:
 
 ### Step 2: Write Tests First (TDD)
 
-Create `crates/hom-adapters/tests/<harness_name>_test.rs`:
+Create `crates/hom-adapters/tests/<harness_name>_test.rs`.
+
+The snippet below is a template, not copy-paste-ready code. Replace placeholder names like `MyAdapter`, `MyHarness`, and helper builders with the real adapter and test helpers for your harness:
 
 ```rust
 #[test]

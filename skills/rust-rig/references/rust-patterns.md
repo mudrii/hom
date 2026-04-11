@@ -89,7 +89,7 @@ This reference preserves the important language-specific guidance from `.claude/
 ## Error Handling
 
 - Return `Result<T, E>` with specific error types, never `Result<T, String>`
-- Use `thiserror` for library errors and `anyhow` only at binary boundaries
+- Prefer `thiserror` for library and domain errors; reserve `anyhow` for binary, orchestration, or outer integration entrypoints
 - Add context to errors: what operation, what input, and why it failed
 - No casual `unwrap()` or `expect()` in production
 - `Option` is only for absence, not as a substitute for `Result`

@@ -114,7 +114,7 @@ Never modify `hom-core` traits without considering all adapters and dependent cr
 
 When feature or public API changes are involved, also run:
 - `cargo test --all-features`
-- `cargo test --no-default-features`
+- `cargo test --no-default-features --features vt100-backend`
 - `cargo test --doc`
 - `cargo doc --no-deps`
 

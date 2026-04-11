@@ -95,7 +95,7 @@ Verification is part of implementation, not optional cleanup:
 - run `cargo fmt --all`
 - run `cargo clippy --all-targets --all-features -- -D warnings`
 - run `cargo nextest run` or `cargo test`
-- if features or public docs changed, also run `cargo test --all-features`, `cargo test --no-default-features`, `cargo test --doc`, and `cargo doc --no-deps`
+- if features or public docs changed, also run `cargo test --all-features`, `cargo test --no-default-features --features vt100-backend`, `cargo test --doc`, and `cargo doc --no-deps`
 
 ## Review Checklist
 

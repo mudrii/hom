@@ -29,6 +29,15 @@ use hom_tui::workflow_bridge::{
 };
 use hom_tui::workflow_progress::WorkflowProgress;
 
+struct RunAppContext {
+    allow_terminal_input: bool,
+    tick_rate: Duration,
+    workflow_rx: WorkflowRequestRx,
+    workflow_launch_rx: WorkflowLaunchRx,
+    bridge: Arc<WorkflowBridge>,
+    workflow_launcher: WorkflowLauncher,
+}
+
 #[derive(Parser)]
 #[command(name = "hom", version, about = "AI Harness Orchestrator TUI")]
 struct Cli {
@@ -49,7 +58,7 @@ struct Cli {
     no_db: bool,
 
     /// Run as an MCP server (JSON-RPC 2.0 over stdin/stdout).
-    /// The TUI renders normally; MCP tool calls are dispatched to it via channel.
+    /// When enabled, the TUI renders on stderr so stdout stays protocol-clean.
     #[arg(long)]
     mcp: bool,
 
@@ -97,9 +106,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Set up terminal
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
+    let mut ui_stream: Box<dyn io::Write> = if cli.mcp {
+        Box::new(io::stderr())
+    } else {
+        Box::new(io::stdout())
+    };
+    execute!(ui_stream, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(ui_stream);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
@@ -154,18 +167,23 @@ async fn main() -> anyhow::Result<()> {
         app.command_bar.last_error = Some("running without database (--no-db)".to_string());
     } else {
         let db_path = app.config.db_path();
-        let db = hom_db::HomDb::open(db_path.to_str().unwrap_or("hom.db"))
-            .await
-            .map_err(|e| {
-                // Restore terminal before showing error
-                let _ = disable_raw_mode();
-                let _ = execute!(io::stdout(), LeaveAlternateScreen);
-                anyhow::anyhow!(
+        let db = match hom_db::HomDb::open(db_path.to_str().unwrap_or("hom.db")).await {
+            Ok(db) => db,
+            Err(e) => {
+                disable_raw_mode()?;
+                execute!(
+                    terminal.backend_mut(),
+                    DisableMouseCapture,
+                    LeaveAlternateScreen
+                )?;
+                terminal.show_cursor()?;
+                return Err(anyhow::anyhow!(
                     "Failed to open database at {}: {e}\n\
                      Use --no-db to run without persistence.",
                     db_path.display()
-                )
-            })?;
+                ));
+            }
+        };
         let db = std::sync::Arc::new(db);
         app.db = Some(db.clone());
         info!(path = %db_path.display(), "database opened");
@@ -217,11 +235,14 @@ async fn main() -> anyhow::Result<()> {
     let result = run_app(
         &mut terminal,
         &mut app,
-        tick_rate,
-        workflow_rx,
-        workflow_launch_rx,
-        bridge,
-        workflow_launcher,
+        RunAppContext {
+            allow_terminal_input: !cli.mcp,
+            tick_rate,
+            workflow_rx,
+            workflow_launch_rx,
+            bridge,
+            workflow_launcher,
+        },
     )
     .await;
 
@@ -245,14 +266,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+async fn run_app<W: io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
     app: &mut App,
-    tick_rate: Duration,
-    mut workflow_rx: WorkflowRequestRx,
-    mut workflow_launch_rx: WorkflowLaunchRx,
-    bridge: Arc<WorkflowBridge>,
-    workflow_launcher: WorkflowLauncher,
+    mut ctx: RunAppContext,
 ) -> anyhow::Result<()> {
     // Cost polling: query total_cost from DB roughly every second.
     let (cost_tx, mut cost_rx) = tokio::sync::mpsc::unbounded_channel::<f64>();
@@ -278,13 +295,13 @@ async fn run_app(
         app.publish_web_frame();
 
         // Drain workflow bridge requests (non-blocking)
-        while let Ok(req) = workflow_rx.try_recv() {
+        while let Ok(req) = ctx.workflow_rx.try_recv() {
             handle_workflow_request(app, req, terminal.size()?.into());
         }
 
-        while let Ok(req) = workflow_launch_rx.try_recv() {
+        while let Ok(req) = ctx.workflow_launch_rx.try_recv() {
             let db = app.db.clone();
-            let bridge = bridge.clone();
+            let bridge = ctx.bridge.clone();
             tokio::spawn(async move {
                 run_workflow_task(
                     req.def,
@@ -302,7 +319,7 @@ async fn run_app(
         app.handle_mcp_requests();
 
         // Poll for events
-        if event::poll(tick_rate)? {
+        if ctx.allow_terminal_input && event::poll(ctx.tick_rate)? {
             let evt = event::read()?;
 
             // Build pane areas for hit testing
@@ -359,7 +376,7 @@ async fn run_app(
                 }
                 Action::CommandBarInput(key) => {
                     if let Some(cmd) = app.command_bar.handle_key(key) {
-                        handle_command(app, cmd, size, &workflow_launcher)?;
+                        handle_command(app, cmd, size, &ctx.workflow_launcher)?;
                     }
                 }
                 Action::NextPane => app.focus_next(),
@@ -431,7 +448,11 @@ async fn run_app(
                     let pid = *pane_id;
                     let tx = health_tx.clone();
                     tokio::spawn(async move {
-                        let healthy = sideband.health_check().await.unwrap_or(false);
+                        let healthy = matches!(
+                            tokio::time::timeout(Duration::from_secs(3), sideband.health_check())
+                                .await,
+                            Ok(Ok(true))
+                        );
                         let _ = tx.send((pid, harness_name, healthy));
                     });
                 }
@@ -1010,5 +1031,179 @@ async fn run_workflow_task(
             }
             error!(workflow = %definition_path, error = %e, "workflow execution failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use hom_core::PaneKind;
+    use hom_tui::command_bar::{Command, PaneSelector};
+
+    fn test_app() -> App {
+        App::new(HomConfig::default())
+    }
+
+    fn insert_test_pane(app: &mut App, id: u32, title: &str) {
+        app.panes.insert(
+            id,
+            hom_tui::app::Pane {
+                id,
+                harness_type: HarnessType::ClaudeCode,
+                pane_kind: PaneKind::Local,
+                plugin_name: None,
+                model: None,
+                working_dir: PathBuf::from("."),
+                extra_args: Vec::new(),
+                title: title.to_string(),
+                terminal: hom_terminal::create_terminal(20, 5, 10).unwrap(),
+                pty_reader: None,
+                sideband: None,
+                exited: None,
+            },
+        );
+        app.pane_order.push(id);
+    }
+
+    #[test]
+    fn parse_var_accepts_values_containing_equals() {
+        assert_eq!(
+            parse_var("task=ship=it").unwrap(),
+            ("task".to_string(), "ship=it".to_string())
+        );
+        assert!(parse_var("missing-delimiter").is_err());
+    }
+
+    #[test]
+    fn resolve_selector_supports_id_and_case_insensitive_name() {
+        let mut app = test_app();
+        insert_test_pane(&mut app, 7, "Claude Review");
+
+        assert_eq!(resolve_selector(&PaneSelector::Id(7), &app), Some(7));
+        assert_eq!(
+            resolve_selector(&PaneSelector::Name("review".to_string()), &app),
+            Some(7)
+        );
+        assert_eq!(
+            resolve_selector(&PaneSelector::Name("CLAUDE".to_string()), &app),
+            Some(7)
+        );
+        assert_eq!(
+            resolve_selector(&PaneSelector::Name("missing".to_string()), &app),
+            None
+        );
+    }
+
+    #[test]
+    fn handle_command_sets_expected_local_error_states() {
+        let mut app = test_app();
+        let (launcher, _rx) = WorkflowLauncher::new();
+        let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+
+        handle_command(&mut app, Command::Help, area, &launcher).unwrap();
+        assert!(
+            app.command_bar
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("commands:")
+        );
+
+        handle_command(&mut app, Command::Save("demo".to_string()), area, &launcher).unwrap();
+        assert_eq!(
+            app.command_bar.last_error.as_deref(),
+            Some("no database available for session save")
+        );
+
+        handle_command(
+            &mut app,
+            Command::Restore("demo".to_string()),
+            area,
+            &launcher,
+        )
+        .unwrap();
+        assert_eq!(
+            app.command_bar.last_error.as_deref(),
+            Some("no database available for session restore")
+        );
+
+        handle_command(
+            &mut app,
+            Command::Run {
+                workflow: "missing-workflow".to_string(),
+                variables: HashMap::new(),
+            },
+            area,
+            &launcher,
+        )
+        .unwrap();
+        assert!(
+            app.command_bar
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("workflow not found:")
+        );
+
+        handle_command(&mut app, Command::Quit, area, &launcher).unwrap();
+        assert!(app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn handle_workflow_request_returns_errors_for_invalid_targets() {
+        let mut app = test_app();
+        let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+
+        let (unknown_tx, unknown_rx) = oneshot::channel();
+        handle_workflow_request(
+            &mut app,
+            WorkflowRequest::SpawnPane {
+                harness: "unknown-harness".to_string(),
+                model: None,
+                reply: unknown_tx,
+            },
+            area,
+        );
+        let err = unknown_rx.await.unwrap().unwrap_err().to_string();
+        assert!(err.contains("unknown harness"));
+
+        let (missing_tx, missing_rx) = oneshot::channel();
+        handle_workflow_request(
+            &mut app,
+            WorkflowRequest::SendAndWait {
+                pane_id: 99,
+                prompt: "hello".to_string(),
+                timeout: Duration::from_secs(1),
+                reply: missing_tx,
+            },
+            area,
+        );
+        let err = missing_rx.await.unwrap().unwrap_err().to_string();
+        assert!(err.contains("pane") && err.contains("99"));
+    }
+
+    #[test]
+    fn handle_workflow_request_updates_progress_state() {
+        let mut app = test_app();
+        app.workflow_progress = Some(WorkflowProgress::new(
+            "demo".to_string(),
+            vec!["plan".to_string(), "review".to_string()],
+        ));
+
+        handle_workflow_request(
+            &mut app,
+            WorkflowRequest::StepUpdate {
+                step_id: "plan".to_string(),
+                status: hom_tui::workflow_progress::StepProgress::Completed,
+            },
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        );
+
+        let summary = app.workflow_progress.as_ref().unwrap().summary();
+        assert!(summary.contains("1/2"));
     }
 }

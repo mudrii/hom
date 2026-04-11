@@ -91,3 +91,119 @@ pub fn render_pane<B: TerminalBackend>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+    use hom_core::{Cell, CellAttributes, CursorState, ScreenSnapshot, TermColor};
+
+    #[derive(Clone)]
+    struct FakeTerminal {
+        snapshot: ScreenSnapshot,
+    }
+
+    impl TerminalBackend for FakeTerminal {
+        fn new(cols: u16, rows: u16, _scrollback: usize) -> hom_core::HomResult<Self> {
+            Ok(Self {
+                snapshot: ScreenSnapshot {
+                    rows: vec![vec![Cell::default(); cols as usize]; rows as usize],
+                    cols,
+                    num_rows: rows,
+                    cursor: CursorState::default(),
+                },
+            })
+        }
+
+        fn process(&mut self, _bytes: &[u8]) {}
+
+        fn resize(&mut self, cols: u16, rows: u16) {
+            self.snapshot.cols = cols;
+            self.snapshot.num_rows = rows;
+        }
+
+        fn screen_snapshot(&self) -> ScreenSnapshot {
+            self.snapshot.clone()
+        }
+
+        fn cursor(&self) -> CursorState {
+            self.snapshot.cursor.clone()
+        }
+
+        fn title(&self) -> Option<&str> {
+            None
+        }
+    }
+
+    #[test]
+    fn render_pane_draws_title_content_and_cursor() {
+        let mut terminal = Terminal::new(TestBackend::new(50, 8)).unwrap();
+        let fake = FakeTerminal {
+            snapshot: ScreenSnapshot {
+                rows: vec![
+                    vec![
+                        Cell {
+                            character: 'A',
+                            fg: TermColor::Red,
+                            bg: TermColor::Blue,
+                            attrs: CellAttributes {
+                                bold: true,
+                                underline: true,
+                                ..CellAttributes::default()
+                            },
+                        },
+                        Cell {
+                            character: 'B',
+                            fg: TermColor::Green,
+                            bg: TermColor::Default,
+                            attrs: CellAttributes::default(),
+                        },
+                    ],
+                    vec![Cell::default(); 2],
+                ],
+                cols: 2,
+                num_rows: 2,
+                cursor: CursorState {
+                    row: 0,
+                    col: 1,
+                    visible: true,
+                },
+            },
+        };
+
+        terminal
+            .draw(|frame| {
+                render_pane(
+                    frame,
+                    Rect::new(0, 0, 50, 8),
+                    &fake,
+                    "Demo",
+                    "Claude Code",
+                    true,
+                    Some(7),
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("Demo"));
+        assert!(content.contains("EXITED: 7"));
+
+        let cell = buffer.cell((1, 1)).unwrap();
+        assert_eq!(cell.symbol(), "A");
+        assert_eq!(cell.fg, Color::Red);
+        assert_eq!(cell.bg, Color::Blue);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+        assert!(cell.modifier.contains(Modifier::UNDERLINED));
+
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!((cursor.x, cursor.y), (2, 1));
+    }
+}

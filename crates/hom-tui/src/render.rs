@@ -123,3 +123,66 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+    use hom_core::HomConfig;
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
+            .collect()
+    }
+
+    #[test]
+    fn render_shows_welcome_state_when_no_panes_exist() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new(HomConfig::default());
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Welcome to HOM"));
+        assert!(text.contains(":spawn claude opus"));
+    }
+
+    #[test]
+    fn render_command_bar_shows_error_message_when_present() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(HomConfig::default());
+        app.command_bar.last_error = Some("boom".to_string());
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Error: boom"));
+    }
+
+    #[test]
+    fn render_command_bar_places_cursor_after_prompt_when_active() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(HomConfig::default());
+        app.input_router.mode = InputMode::CommandBar;
+        app.command_bar.input = "spawn claude".to_string();
+        app.command_bar.cursor_pos = app.command_bar.input.len();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(
+            (cursor.x, cursor.y),
+            (2 + app.command_bar.cursor_pos as u16, 22)
+        );
+    }
+}

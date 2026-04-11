@@ -27,6 +27,10 @@ pub struct HttpSideband {
 
 impl HttpSideband {
     pub fn new(base_url: String) -> Self {
+        // Reqwest 0.13's `rustls-no-provider` feature expects the application to
+        // install a process-wide rustls provider before the first client build.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         Self {
             base_url,
             client: Client::new(),

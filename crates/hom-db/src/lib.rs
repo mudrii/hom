@@ -55,3 +55,39 @@ impl HomDb {
         &self.pool
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn open_creates_parent_dir_and_schema() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("nested/hom.sqlite");
+
+        let db = HomDb::open(db_path.to_str().unwrap()).await.unwrap();
+
+        assert!(db_path.parent().unwrap().exists());
+
+        let tables: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('workflows', 'steps', 'sessions', 'cost_log', 'checkpoints') ORDER BY name",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+
+        let names: Vec<String> = tables.into_iter().map(|(name,)| name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "checkpoints".to_string(),
+                "cost_log".to_string(),
+                "sessions".to_string(),
+                "steps".to_string(),
+                "workflows".to_string(),
+            ]
+        );
+    }
+}

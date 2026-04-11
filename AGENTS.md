@@ -11,7 +11,7 @@ Steps:
 3. Fetch docs: `npx ctx7@latest docs <libraryId> "<user's question>"`
 4. Answer using the fetched documentation
 
-Do not run more than 3 `ctx7` commands per question. If `ctx7` fails with a quota error, tell the user and suggest `npx ctx7@latest login` or setting `CONTEXT7_API_KEY`.
+Do not run more than 3 `ctx7` commands per question. If `ctx7` fails with a quota or rate-limit error, tell the user and suggest setting `CONTEXT7_API_KEY` first, or using `npx ctx7@latest login` for CLI auth.
 <!-- context7 -->
 
 # HOM Repository Instructions
@@ -72,7 +72,7 @@ For feature work or multi-step changes, write a plan in:
 - Keep crates, modules, types, and functions focused on one clear responsibility
 - Avoid dumping-ground modules like `utils`, `helpers`, or `common`
 - Prefer strict types, enums, newtypes, and validated constructors over stringly typed state
-- Use `thiserror` for library errors and keep `anyhow` at binary/orchestration boundaries
+- Prefer `thiserror` for library and domain errors; reserve `anyhow` for binary, orchestration, or outer integration entrypoints
 - Do not use casual `unwrap()` or `expect()` in production code
 - No globals, hidden singletons, or hardcoded collaborator construction in core logic
 - Separate domain logic from transport, persistence, configuration, and presentation
@@ -100,7 +100,7 @@ Run these commands as appropriate to the affected scope:
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo nextest run` or `cargo test`
 - `cargo test --all-features`
-- `cargo test --no-default-features`
+- `cargo test --no-default-features --features vt100-backend`
 - `cargo test --doc`
 - `cargo doc --no-deps`
 

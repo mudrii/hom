@@ -74,7 +74,7 @@ cargo audit                          # vulnerability scan
 cargo deny check                     # license + supply-chain policy
 ```
 
-Workspace: add `--workspace` to check/test/nextest/clippy. Feature/doc changes: also run `cargo test --all-features`, `--no-default-features`, `--doc`, `cargo doc --no-deps`.
+Workspace: add `--workspace` to check/test/nextest/clippy. Feature/doc changes: also run `cargo test --all-features`, `cargo test --no-default-features --features vt100-backend`, `cargo test --doc`, `cargo doc --no-deps`.
 
 ### Mandatory for all changes
 - Run `cargo check` after every change — zero errors required
@@ -159,7 +159,7 @@ Workspace: add `--workspace` to check/test/nextest/clippy. Feature/doc changes: 
 - Types encode intent: enums over strings, newtypes over raw primitives
 
 ### Error Handling — Clear, Concise, Contextual
-- `thiserror` for typed library errors; `anyhow` only at binary/orchestration boundaries
+- Prefer `thiserror` for typed library and domain errors; reserve `anyhow` for binary, orchestration, or outer integration entrypoints
 - No `unwrap()`/`expect()` in production without strong invariant + comment
 - `Option` only when absence is the whole story; panics for programmer bugs only
 - Return specific error types from internal APIs — never `String`
@@ -294,7 +294,7 @@ hom/
 - OpenCode HTTP sideband endpoints updated to match real API (/global/health, /session/:id/prompt_async)
 - compile_error! added to hom-terminal when no backend feature is enabled
 - ghostty.rs docs clarified — Zig ≥0.15.x, explains the commented-out Cargo.toml dependency
-- hom-terminal lib.rs docstring corrected to "vt100 (current default)" not "libghostty-rs (primary)"
+- hom-terminal lib.rs docstring corrected to match current backend roles: ghostty default, vt100 opt-in fallback
 - Design doc re-labeled from "Final Product Design" to "Architecture & Implementation Status"
 - Design doc command table corrected — :run/:save/:restore accurately show partial/stub status
 - Design doc remaining work table expanded with all newly identified gaps

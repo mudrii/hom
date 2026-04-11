@@ -103,7 +103,7 @@ When adding a new backend, you must map its color representation to `TermColor`.
 ```rust
 #[test]
 fn test_process_simple_text() {
-    let mut term = Vt100Backend::new(80, 24, 0);
+    let mut term = Vt100Backend::new(80, 24, 0).unwrap();
     term.process(b"Hello, World!");
     let snap = term.screen_snapshot();
     let first_row: String = snap.rows[0].iter().map(|c| c.character).collect();
@@ -112,7 +112,7 @@ fn test_process_simple_text() {
 
 #[test]
 fn test_process_color_escape() {
-    let mut term = Vt100Backend::new(80, 24, 0);
+    let mut term = Vt100Backend::new(80, 24, 0).unwrap();
     term.process(b"\x1b[31mRed text\x1b[0m");
     let snap = term.screen_snapshot();
     assert!(matches!(snap.rows[0][0].fg, TermColor::Red));
@@ -120,7 +120,7 @@ fn test_process_color_escape() {
 
 #[test]
 fn test_cursor_movement() {
-    let mut term = Vt100Backend::new(80, 24, 0);
+    let mut term = Vt100Backend::new(80, 24, 0).unwrap();
     term.process(b"Line 1\nLine 2");
     let cursor = term.cursor();
     assert_eq!(cursor.row, 1);
@@ -128,7 +128,7 @@ fn test_cursor_movement() {
 
 #[test]
 fn test_resize() {
-    let mut term = Vt100Backend::new(80, 24, 0);
+    let mut term = Vt100Backend::new(80, 24, 0).unwrap();
     term.resize(40, 12);
     let snap = term.screen_snapshot();
     assert_eq!(snap.cols, 40);

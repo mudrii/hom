@@ -42,8 +42,12 @@ impl McpServer {
             debug!("MCP ← {line}");
 
             let response = match serde_json::from_str::<RpcRequest>(&line) {
-                Err(e) => RpcResponse::err(None, -32700, format!("Parse error: {e}")),
+                Err(e) => Some(RpcResponse::err(None, -32700, format!("Parse error: {e}"))),
                 Ok(req) => self.dispatch(req).await,
+            };
+
+            let Some(response) = response else {
+                continue;
             };
 
             let json_line = match serde_json::to_string(&response) {
@@ -69,9 +73,21 @@ impl McpServer {
         }
     }
 
-    async fn dispatch(&self, req: RpcRequest) -> RpcResponse {
+    async fn dispatch(&self, req: RpcRequest) -> Option<RpcResponse> {
         let id = req.id.clone();
-        match req.method.as_str() {
+        let is_notification = id.is_none();
+
+        let response = match req.method.as_str() {
+            "notifications/initialized" => {
+                debug!("MCP client initialized");
+                return None;
+            }
+
+            "notifications/cancelled" => {
+                warn!("MCP: client cancelled request");
+                return None;
+            }
+
             "initialize" => RpcResponse::ok(
                 id,
                 json!({
@@ -81,17 +97,21 @@ impl McpServer {
                 }),
             ),
 
-            "notifications/initialized" => {
-                // No response required for notifications
-                RpcResponse::ok(None, json!(null))
-            }
-
             "tools/list" => RpcResponse::ok(id, tool_list()),
 
             "tools/call" => {
                 let tool_name = match req.params["name"].as_str() {
                     Some(n) => n,
-                    None => return RpcResponse::err(id, -32602, "tools/call: 'name' is required"),
+                    None => {
+                        if is_notification {
+                            return None;
+                        }
+                        return Some(RpcResponse::err(
+                            id,
+                            -32602,
+                            "tools/call: 'name' is required",
+                        ));
+                    }
                 };
                 let args = &req.params["arguments"];
                 match handle_tool_call(tool_name, args, &self.tx).await {
@@ -106,15 +126,52 @@ impl McpServer {
                 }
             }
 
-            "notifications/cancelled" => {
-                warn!("MCP: client cancelled request");
-                RpcResponse::ok(None, json!(null))
-            }
-
             unknown => {
                 warn!("MCP: unknown method {unknown}");
                 RpcResponse::err(id, -32601, format!("Method not found: {unknown}"))
             }
+        };
+
+        if is_notification {
+            None
+        } else {
+            Some(response)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn notification_request_returns_no_response() {
+        let (tx, _rx) = mpsc::channel(1);
+        let server = McpServer::new(tx);
+        let req = RpcRequest {
+            jsonrpc: "2.0".into(),
+            id: None,
+            method: "notifications/initialized".into(),
+            params: json!({}),
+        };
+
+        assert!(server.dispatch(req).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn regular_request_returns_response() {
+        let (tx, _rx) = mpsc::channel(1);
+        let server = McpServer::new(tx);
+        let req = RpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+
+        assert!(server.dispatch(req).await.is_some());
     }
 }

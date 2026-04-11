@@ -31,14 +31,17 @@ steps:
     harness: <harness-name>          # Must match HarnessType::from_str_loose()
     model: <optional-model-name>
     prompt: |
-      <minijinja template — can reference {{ variables }} and {{ steps.<id>.output }}>
+      <minijinja template — can reference top-level vars like {{ task }} and step outputs like {{ steps.plan.output }}>
     depends_on: [<step-id>, ...]     # Optional — steps with no deps run first
-    timeout: <duration>              # Optional — e.g., "300s", "5m"
+    timeout: <duration>              # Optional — e.g., "300s", "5m", or bare seconds like "300"
     condition: '<expression>'        # Optional — evaluated before execution
     retry:                           # Optional
       max_attempts: <n>
       backoff: exponential|linear|fixed
-    on_failure: abort|skip|fallback(<step-id>)  # Optional — default is abort
+    on_failure: skip                 # Optional — default is abort
+    # Or:
+    # on_failure:
+    #   fallback: <step-id>
 ```
 
 ## Validation Rules
@@ -49,7 +52,7 @@ The parser in `parser.rs` and `dag.rs` enforce:
 2. **Valid dependencies** — Every `depends_on` reference must point to an existing step `id`
 3. **Acyclic graph** — `petgraph::algo::toposort` must succeed; cycles are rejected
 4. **Valid harness names** — `harness` field must parse via `HarnessType::from_str_loose()`
-5. **Timeout format** — Must end with `s` (seconds) or `m` (minutes)
+5. **Timeout parsing** — `parse_timeout()` accepts `300s`, `5m`, or bare seconds like `300`
 
 ## Writing Good Workflows
 
@@ -57,7 +60,7 @@ The parser in `parser.rs` and `dag.rs` enforce:
 
 Prompts are minijinja templates. Available variables:
 
-- `{{ variable_name }}` — Runtime variables from `--var key=value`
+- `{{ task }}` — Runtime variables from `--var key=value` are injected at the top level by name
 - `{{ steps.<step-id>.output }}` — Output captured from a completed step
 
 **Good prompt:**
@@ -93,6 +96,12 @@ Supported operators:
 - `steps.<id>.output contains "<substring>"`
 - `steps.<id>.status == "completed"`
 - `steps.<id>.status != "failed"`
+- `expr1 && expr2`
+- `expr1 || expr2`
+
+Notes:
+- `&&` binds tighter than `||`
+- Parentheses are not supported
 
 ### Failure Handling
 
@@ -100,7 +109,7 @@ Supported operators:
 |----------|----------|
 | `abort` (default) | Stop entire workflow, report failure |
 | `skip` | Mark step as skipped, continue to dependents |
-| `fallback(<step-id>)` | Run an alternative step instead |
+| `on_failure: { fallback: <step-id> }` | Run an alternative step instead |
 
 ## Testing Workflows
 
@@ -143,8 +152,28 @@ steps:
 #[test]
 fn test_cycle_detection() {
     let steps = vec![
-        StepDef { id: "a".into(), depends_on: vec!["b".into()], .. },
-        StepDef { id: "b".into(), depends_on: vec!["a".into()], .. },
+        StepDef {
+            id: "a".into(),
+            harness: "claude".into(),
+            model: None,
+            prompt: "a".into(),
+            depends_on: vec!["b".into()],
+            timeout: None,
+            condition: None,
+            retry: None,
+            on_failure: None,
+        },
+        StepDef {
+            id: "b".into(),
+            harness: "codex".into(),
+            model: None,
+            prompt: "b".into(),
+            depends_on: vec!["a".into()],
+            timeout: None,
+            condition: None,
+            retry: None,
+            on_failure: None,
+        },
     ];
     assert!(WorkflowDag::from_steps(&steps).is_err());
 }
@@ -152,12 +181,32 @@ fn test_cycle_detection() {
 #[test]
 fn test_topo_order() {
     let steps = vec![
-        StepDef { id: "plan".into(), depends_on: vec![], .. },
-        StepDef { id: "implement".into(), depends_on: vec!["plan".into()], .. },
+        StepDef {
+            id: "plan".into(),
+            harness: "claude".into(),
+            model: None,
+            prompt: "plan".into(),
+            depends_on: vec![],
+            timeout: None,
+            condition: None,
+            retry: None,
+            on_failure: None,
+        },
+        StepDef {
+            id: "implement".into(),
+            harness: "codex".into(),
+            model: None,
+            prompt: "implement".into(),
+            depends_on: vec!["plan".into()],
+            timeout: None,
+            condition: None,
+            retry: None,
+            on_failure: None,
+        },
     ];
     let dag = WorkflowDag::from_steps(&steps).unwrap();
     let order = dag.topo_order().unwrap();
-    assert_eq!(order, vec!["plan", "implement"]);
+    assert_eq!(order, vec!["plan".to_string(), "implement".to_string()]);
 }
 ```
 

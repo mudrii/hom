@@ -171,7 +171,7 @@ Verification is part of the implementation, not an optional cleanup step.
 - Run `cargo fmt --all`
 - Run `cargo clippy --all-targets --all-features -- -D warnings`
 - Run `cargo nextest run` (or `cargo test` if nextest is not installed)
-- If features or public docs changed, also run `cargo test --all-features`, `cargo test --no-default-features`, `cargo test --doc`, and `cargo doc --no-deps`
+- If features or public docs changed, also run `cargo test --all-features`, `cargo test --no-default-features --features vt100-backend`, `cargo test --doc`, and `cargo doc --no-deps`
 - Treat linting and static analysis as normal development tools, not release-only checks
 </tooling_rules>
 

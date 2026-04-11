@@ -1,0 +1,6 @@
+[env]
+# Keep the workspace deployment target aligned with the default Ghostty dylib build
+# on Apple Silicon. Rust's aarch64-apple-darwin target defaults to macOS 11.0,
+# which causes link failures here when combined with libghostty-vt and newer
+# native TLS/toolchain objects built for a higher minimum macOS version.
+MACOSX_DEPLOYMENT_TARGET = "13.0"

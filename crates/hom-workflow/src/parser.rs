@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use hom_core::{HomError, HomResult};
@@ -62,8 +63,7 @@ fn default_max_attempts() -> u32 {
 }
 
 /// What to do when a step fails.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize)]
 pub enum FailureAction {
     /// Stop the entire workflow.
     Abort,
@@ -71,6 +71,71 @@ pub enum FailureAction {
     Skip,
     /// Run a fallback step.
     Fallback(String),
+}
+
+impl<'de> Deserialize<'de> for FailureAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct FailureActionVisitor;
+
+        impl<'de> Visitor<'de> for FailureActionVisitor {
+            type Value = FailureAction;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(r#"one of: "abort", "skip", or { fallback: <step-id> }"#)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "abort" => Ok(FailureAction::Abort),
+                    "skip" => Ok(FailureAction::Skip),
+                    other => Err(E::unknown_variant(other, &["abort", "skip", "fallback"])),
+                }
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let Some(key) = map.next_key::<String>()? else {
+                    return Err(de::Error::custom("expected a failure action mapping"));
+                };
+
+                let action = match key.as_str() {
+                    "fallback" => FailureAction::Fallback(map.next_value::<String>()?),
+                    "abort" => {
+                        let _: Option<serde::de::IgnoredAny> = map.next_value()?;
+                        FailureAction::Abort
+                    }
+                    "skip" => {
+                        let _: Option<serde::de::IgnoredAny> = map.next_value()?;
+                        FailureAction::Skip
+                    }
+                    other => {
+                        return Err(de::Error::unknown_field(
+                            other,
+                            &["abort", "skip", "fallback"],
+                        ));
+                    }
+                };
+
+                if map.next_key::<String>()?.is_some() {
+                    return Err(de::Error::custom(
+                        "failure action mapping must contain exactly one key",
+                    ));
+                }
+
+                Ok(action)
+            }
+        }
+
+        deserializer.deserialize_any(FailureActionVisitor)
+    }
 }
 
 impl WorkflowDef {
@@ -127,5 +192,42 @@ impl WorkflowDef {
         } else {
             s.parse().ok()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_failure_action_skip() {
+        let yaml = r#"
+name: failure-actions
+steps:
+  - id: a
+    harness: claude
+    prompt: "hi"
+    on_failure: skip
+"#;
+        let def = WorkflowDef::from_yaml(yaml).unwrap();
+        assert!(matches!(def.steps[0].on_failure, Some(FailureAction::Skip)));
+    }
+
+    #[test]
+    fn test_parse_failure_action_mapping_fallback() {
+        let yaml = r#"
+name: failure-actions
+steps:
+  - id: a
+    harness: claude
+    prompt: "hi"
+    on_failure:
+      fallback: recover
+"#;
+        let def = WorkflowDef::from_yaml(yaml).unwrap();
+        assert!(matches!(
+            def.steps[0].on_failure.as_ref(),
+            Some(FailureAction::Fallback(id)) if id == "recover"
+        ));
     }
 }

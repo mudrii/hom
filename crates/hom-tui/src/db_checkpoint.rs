@@ -61,3 +61,90 @@ impl CheckpointStore for DbCheckpointStore {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use hom_db::HomDb;
+
+    async fn open_temp_db() -> Arc<HomDb> {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("hom.sqlite");
+        std::mem::forget(temp);
+        Arc::new(HomDb::open(db_path.to_str().unwrap()).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn save_checkpoint_persists_latest_json() {
+        let db = open_temp_db().await;
+        let store = DbCheckpointStore::new(db.clone());
+
+        store
+            .save_checkpoint("wf-1", r#"{"step":"plan"}"#)
+            .await
+            .unwrap();
+        store
+            .save_checkpoint("wf-1", r#"{"step":"review"}"#)
+            .await
+            .unwrap();
+
+        let row: (String,) =
+            sqlx::query_as("SELECT checkpoint_json FROM checkpoints WHERE workflow_id = ?")
+                .bind("wf-1")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(row.0, r#"{"step":"review"}"#);
+    }
+
+    #[tokio::test]
+    async fn save_step_result_writes_step_row() {
+        let db = open_temp_db().await;
+        let store = DbCheckpointStore::new(db.clone());
+
+        hom_db::workflow::save_workflow(
+            db.pool(),
+            "wf-2",
+            "demo",
+            "/tmp/demo.yaml",
+            "running",
+            "{}",
+        )
+        .await
+        .unwrap();
+
+        store
+            .save_step_result(StepResultRecord {
+                workflow_id: "wf-2",
+                step_id: "plan",
+                harness: "claude",
+                model: Some("opus"),
+                status: "completed",
+                prompt: "make a plan",
+                output: "done",
+                duration_ms: 123,
+                attempt: 2,
+            })
+            .await
+            .unwrap();
+
+        let row: (String, String, String, Option<String>, i64, i32) = sqlx::query_as(
+            "SELECT step_name, harness, status, model, duration_ms, attempt FROM steps WHERE workflow_id = ?",
+        )
+        .bind("wf-2")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "plan");
+        assert_eq!(row.1, "claude");
+        assert_eq!(row.2, "completed");
+        assert_eq!(row.3.as_deref(), Some("opus"));
+        assert_eq!(row.4, 123);
+        assert_eq!(row.5, 2);
+    }
+}

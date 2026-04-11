@@ -171,3 +171,95 @@ impl WorkflowRuntime for WorkflowBridge {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflow_progress::StepProgress;
+
+    #[tokio::test]
+    async fn spawn_pane_sends_request_and_returns_reply() {
+        let (bridge, mut rx) = WorkflowBridge::new();
+
+        let task = tokio::spawn(async move {
+            bridge
+                .spawn_pane("claude", Some("opus"))
+                .await
+                .expect("spawn_pane should succeed")
+        });
+
+        let request = rx.recv().await.unwrap();
+        match request {
+            WorkflowRequest::SpawnPane {
+                harness,
+                model,
+                reply,
+            } => {
+                assert_eq!(harness, "claude");
+                assert_eq!(model.as_deref(), Some("opus"));
+                reply.send(Ok(42)).unwrap();
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        assert_eq!(task.await.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn send_and_wait_reports_closed_channel() {
+        let (bridge, rx) = WorkflowBridge::new();
+        drop(rx);
+
+        let err = bridge
+            .send_and_wait(7, "hello", Duration::from_secs(1))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("workflow bridge channel closed"));
+    }
+
+    #[tokio::test]
+    async fn report_step_status_maps_known_and_unknown_states() {
+        let (bridge, mut rx) = WorkflowBridge::new();
+
+        bridge.report_step_status("plan", "completed").await;
+        match rx.recv().await.unwrap() {
+            WorkflowRequest::StepUpdate { step_id, status } => {
+                assert_eq!(step_id, "plan");
+                assert!(matches!(status, StepProgress::Completed));
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        bridge.report_step_status("review", "mystery").await;
+        match rx.recv().await.unwrap() {
+            WorkflowRequest::StepUpdate { step_id, status } => {
+                assert_eq!(step_id, "review");
+                assert!(matches!(status, StepProgress::Pending));
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_launcher_returns_error_when_receiver_is_closed() {
+        let (launcher, rx) = WorkflowLauncher::new();
+        drop(rx);
+
+        let err = launcher
+            .launch(
+                WorkflowDef {
+                    name: "demo".to_string(),
+                    description: String::new(),
+                    variables: HashMap::new(),
+                    steps: Vec::new(),
+                },
+                HashMap::new(),
+                "/tmp/demo.yaml".to_string(),
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("workflow launch channel closed"));
+    }
+}

@@ -102,3 +102,103 @@ pub async fn save_step(pool: &SqlitePool, record: SaveStepRecord<'_>) -> HomResu
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::HomDb;
+
+    async fn open_temp_db() -> HomDb {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("hom.sqlite");
+        std::mem::forget(temp);
+        HomDb::open(db_path.to_str().unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_workflow_and_update_status_persist_lifecycle() {
+        let db = open_temp_db().await;
+
+        save_workflow(
+            db.pool(),
+            "wf-1",
+            "review",
+            "/tmp/review.yaml",
+            "running",
+            "{\"task\":\"demo\"}",
+        )
+        .await
+        .unwrap();
+        update_workflow_status(db.pool(), "wf-1", "failed", Some("boom"))
+            .await
+            .unwrap();
+
+        let row: (String, String, String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT name, definition_path, status, error, completed_at FROM workflows WHERE id = ?",
+        )
+        .bind("wf-1")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "review");
+        assert_eq!(row.1, "/tmp/review.yaml");
+        assert_eq!(row.2, "failed");
+        assert_eq!(row.3.as_deref(), Some("boom"));
+        assert!(row.4.is_some());
+    }
+
+    #[tokio::test]
+    async fn save_step_persists_all_fields() {
+        let db = open_temp_db().await;
+        save_workflow(
+            db.pool(),
+            "wf-2",
+            "implement",
+            "/tmp/implement.yaml",
+            "running",
+            "{}",
+        )
+        .await
+        .unwrap();
+
+        save_step(
+            db.pool(),
+            SaveStepRecord {
+                id: "step-row",
+                workflow_id: "wf-2",
+                step_name: "plan",
+                harness: "claude",
+                model: Some("opus"),
+                status: "completed",
+                prompt: "plan it",
+                output: "done",
+                duration_ms: 321,
+                attempt: 2,
+            },
+        )
+        .await
+        .unwrap();
+
+        let row: (String, String, String, Option<String>, String, String, String, i64, i32) =
+            sqlx::query_as(
+                "SELECT workflow_id, step_name, harness, model, status, prompt, output, duration_ms, attempt FROM steps WHERE id = ?",
+            )
+            .bind("step-row")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(row.0, "wf-2");
+        assert_eq!(row.1, "plan");
+        assert_eq!(row.2, "claude");
+        assert_eq!(row.3.as_deref(), Some("opus"));
+        assert_eq!(row.4, "completed");
+        assert_eq!(row.5, "plan it");
+        assert_eq!(row.6, "done");
+        assert_eq!(row.7, 321);
+        assert_eq!(row.8, 2);
+    }
+}

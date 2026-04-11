@@ -114,3 +114,51 @@ pub fn pane_at_position(pane_areas: &[(PaneId, Rect)], col: u16, row: u16) -> Op
         })
         .map(|(id, _)| *id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_layout_only_returns_first_pane_when_multiple_exist() {
+        let panes = vec![1, 2, 3];
+        let areas = compute_pane_areas(Rect::new(0, 0, 90, 30), &panes, &LayoutKind::Single);
+
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0], (1, Rect::new(0, 0, 90, 30)));
+    }
+
+    #[test]
+    fn grid_layout_covers_all_panes_without_zero_sized_regions() {
+        let panes = vec![1, 2, 3, 4, 5];
+        let areas = compute_pane_areas(Rect::new(0, 0, 100, 40), &panes, &LayoutKind::Grid);
+
+        assert_eq!(areas.len(), panes.len());
+        assert_eq!(areas.iter().map(|(id, _)| *id).collect::<Vec<_>>(), panes);
+        assert!(
+            areas
+                .iter()
+                .all(|(_, rect)| rect.width > 0 && rect.height > 0)
+        );
+    }
+
+    #[test]
+    fn tabbed_layout_gives_every_pane_full_area() {
+        let panes = vec![10, 20];
+        let area = Rect::new(3, 4, 70, 20);
+        let areas = compute_pane_areas(area, &panes, &LayoutKind::Tabbed);
+
+        assert_eq!(areas, vec![(10, area), (20, area)]);
+    }
+
+    #[test]
+    fn pane_at_position_respects_boundaries() {
+        let pane_areas = vec![(1, Rect::new(0, 0, 50, 10)), (2, Rect::new(50, 0, 50, 10))];
+
+        assert_eq!(pane_at_position(&pane_areas, 0, 0), Some(1));
+        assert_eq!(pane_at_position(&pane_areas, 49, 9), Some(1));
+        assert_eq!(pane_at_position(&pane_areas, 50, 0), Some(2));
+        assert_eq!(pane_at_position(&pane_areas, 99, 9), Some(2));
+        assert_eq!(pane_at_position(&pane_areas, 100, 9), None);
+    }
+}

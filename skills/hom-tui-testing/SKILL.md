@@ -36,7 +36,7 @@ Breaking any link in this chain means the user sees nothing, gets stuck, or lose
 #[test]
 fn test_parse_spawn_command() {
     let cmd = parse_command("spawn claude opus");
-    assert!(matches!(cmd, Ok(Command::Spawn { harness: HarnessType::ClaudeCode, .. })));
+    assert!(matches!(cmd, Ok(Command::Spawn { harness: Some(HarnessType::ClaudeCode), .. })));
 }
 
 #[test]
