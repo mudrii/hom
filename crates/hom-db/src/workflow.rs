@@ -4,6 +4,20 @@ use sqlx::SqlitePool;
 
 use hom_core::{HomError, HomResult};
 
+/// Flat record for persisting a workflow step result.
+pub struct SaveStepRecord<'a> {
+    pub id: &'a str,
+    pub workflow_id: &'a str,
+    pub step_name: &'a str,
+    pub harness: &'a str,
+    pub model: Option<&'a str>,
+    pub status: &'a str,
+    pub prompt: &'a str,
+    pub output: &'a str,
+    pub duration_ms: i64,
+    pub attempt: i32,
+}
+
 /// Save a workflow execution record.
 pub async fn save_workflow(
     pool: &SqlitePool,
@@ -52,20 +66,19 @@ pub async fn update_workflow_status(
 }
 
 /// Save a step result.
-#[allow(clippy::too_many_arguments)] // mirrors the 12-column INSERT; a param struct can come later
-pub async fn save_step(
-    pool: &SqlitePool,
-    id: &str,
-    workflow_id: &str,
-    step_name: &str,
-    harness: &str,
-    model: Option<&str>,
-    status: &str,
-    prompt: &str,
-    output: &str,
-    duration_ms: i64,
-    attempt: i32,
-) -> HomResult<()> {
+pub async fn save_step(pool: &SqlitePool, record: SaveStepRecord<'_>) -> HomResult<()> {
+    let SaveStepRecord {
+        id,
+        workflow_id,
+        step_name,
+        harness,
+        model,
+        status,
+        prompt,
+        output,
+        duration_ms,
+        attempt,
+    } = record;
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
         "INSERT INTO steps (id, workflow_id, step_name, harness, model, status, prompt, output, started_at, completed_at, duration_ms, attempt)

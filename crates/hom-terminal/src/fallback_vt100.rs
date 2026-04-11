@@ -8,6 +8,9 @@ use hom_core::traits::{
     Cell, CellAttributes, CursorState, ScreenSnapshot, TermColor, TerminalBackend,
 };
 
+#[cfg(feature = "vt100-backend")]
+use hom_core::HomResult;
+
 /// Fallback terminal emulator backed by the `vt100` crate.
 ///
 /// Good enough for most harnesses but lacks Kitty graphics protocol
@@ -18,11 +21,18 @@ pub struct Vt100Backend {
 }
 
 #[cfg(feature = "vt100-backend")]
-impl TerminalBackend for Vt100Backend {
-    fn new(cols: u16, rows: u16, _scrollback: usize) -> Self {
+impl Vt100Backend {
+    fn build(cols: u16, rows: u16) -> Self {
         Self {
             parser: vt100::Parser::new(rows, cols, 0),
         }
+    }
+}
+
+#[cfg(feature = "vt100-backend")]
+impl TerminalBackend for Vt100Backend {
+    fn new(cols: u16, rows: u16, _scrollback: usize) -> HomResult<Self> {
+        Ok(Self::build(cols, rows))
     }
 
     fn process(&mut self, bytes: &[u8]) {
@@ -41,7 +51,10 @@ impl TerminalBackend for Vt100Backend {
         for row_idx in 0..rows_count {
             let mut row = Vec::with_capacity(cols_count as usize);
             for col_idx in 0..cols_count {
-                let vt_cell = screen.cell(row_idx, col_idx).unwrap();
+                let Some(vt_cell) = screen.cell(row_idx, col_idx) else {
+                    row.push(Cell::default());
+                    continue;
+                };
                 row.push(Cell {
                     character: vt_cell.contents().chars().next().unwrap_or(' '),
                     fg: map_vt100_color(vt_cell.fgcolor()),
@@ -122,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_process_and_snapshot() {
-        let mut term = Vt100Backend::new(80, 24, 100);
+        let mut term = Vt100Backend::new(80, 24, 100).unwrap();
         term.process(b"Hello, World!");
         let snap = term.screen_snapshot();
         let text = snap.text();
@@ -131,7 +144,7 @@ mod tests {
 
     #[test]
     fn test_color_processing() {
-        let mut term = Vt100Backend::new(80, 24, 100);
+        let mut term = Vt100Backend::new(80, 24, 100).unwrap();
         term.process(b"\x1b[31mRed\x1b[0m");
         let snap = term.screen_snapshot();
         assert!(
@@ -143,7 +156,7 @@ mod tests {
 
     #[test]
     fn test_resize() {
-        let mut term = Vt100Backend::new(80, 24, 100);
+        let mut term = Vt100Backend::new(80, 24, 100).unwrap();
         term.resize(40, 12);
         let snap = term.screen_snapshot();
         assert_eq!(snap.cols, 40);
@@ -152,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_cursor_movement() {
-        let mut term = Vt100Backend::new(80, 24, 100);
+        let mut term = Vt100Backend::new(80, 24, 100).unwrap();
         // LF moves down without carriage return; \r\n resets column
         term.process(b"abc\r\ndef");
         let cursor = term.cursor();
@@ -162,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_newline_handling() {
-        let mut term = Vt100Backend::new(80, 24, 100);
+        let mut term = Vt100Backend::new(80, 24, 100).unwrap();
         term.process(b"line1\nline2\nline3");
         let snap = term.screen_snapshot();
         let text = snap.text();
@@ -192,7 +205,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let n = reader.read(&mut buf).unwrap_or(0);
 
-        let mut term = Vt100Backend::new(80, 24, 100);
+        let mut term = Vt100Backend::new(80, 24, 100).unwrap();
         term.process(&buf[..n]);
 
         let snap = term.screen_snapshot();

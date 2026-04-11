@@ -15,6 +15,9 @@ use libghostty_vt::{
 };
 
 #[cfg(feature = "ghostty-backend")]
+use hom_core::{HomError, HomResult};
+
+#[cfg(feature = "ghostty-backend")]
 use hom_core::traits::{
     Cell, CellAttributes, CursorState, ScreenSnapshot, TermColor, TerminalBackend,
 };
@@ -45,19 +48,27 @@ unsafe impl Send for GhosttyBackend {}
 unsafe impl Sync for GhosttyBackend {}
 
 #[cfg(feature = "ghostty-backend")]
-impl TerminalBackend for GhosttyBackend {
-    fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
+impl GhosttyBackend {
+    fn build(cols: u16, rows: u16, scrollback: usize) -> HomResult<Self> {
         let terminal = Terminal::new(TerminalOptions {
             cols,
             rows,
             max_scrollback: scrollback,
         })
-        .expect("libghostty-vt terminal init failed");
-        Self {
+        .map_err(|error| HomError::TerminalError(format!("libghostty-vt init failed: {error}")))?;
+
+        Ok(Self {
             terminal,
             cols,
             rows,
-        }
+        })
+    }
+}
+
+#[cfg(feature = "ghostty-backend")]
+impl TerminalBackend for GhosttyBackend {
+    fn new(cols: u16, rows: u16, scrollback: usize) -> HomResult<Self> {
+        Self::build(cols, rows, scrollback)
     }
 
     fn process(&mut self, bytes: &[u8]) {
@@ -189,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_new_creates_correct_dimensions() {
-        let backend = GhosttyBackend::new(80, 24, 1_000);
+        let backend = GhosttyBackend::new(80, 24, 1_000).unwrap();
         let snap = backend.screen_snapshot();
         assert_eq!(snap.cols, 80);
         assert_eq!(snap.num_rows, 24);
@@ -199,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_process_plain_text() {
-        let mut backend = GhosttyBackend::new(80, 24, 1_000);
+        let mut backend = GhosttyBackend::new(80, 24, 1_000).unwrap();
         backend.process(b"hello");
         let snap = backend.screen_snapshot();
         let first_chars: String = snap.rows[0].iter().take(5).map(|c| c.character).collect();
@@ -208,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_resize_updates_dimensions() {
-        let mut backend = GhosttyBackend::new(80, 24, 1_000);
+        let mut backend = GhosttyBackend::new(80, 24, 1_000).unwrap();
         backend.resize(120, 40);
         let snap = backend.screen_snapshot();
         assert_eq!(snap.cols, 120);
@@ -219,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_cursor_starts_at_origin() {
-        let backend = GhosttyBackend::new(80, 24, 1_000);
+        let backend = GhosttyBackend::new(80, 24, 1_000).unwrap();
         let cursor = backend.cursor();
         assert_eq!(cursor.row, 0);
         assert_eq!(cursor.col, 0);
@@ -228,13 +239,13 @@ mod tests {
 
     #[test]
     fn test_title_none_on_fresh_terminal() {
-        let backend = GhosttyBackend::new(80, 24, 1_000);
+        let backend = GhosttyBackend::new(80, 24, 1_000).unwrap();
         assert_eq!(backend.title(), None);
     }
 
     #[test]
     fn test_ansi_red_foreground() {
-        let mut backend = GhosttyBackend::new(80, 24, 1_000);
+        let mut backend = GhosttyBackend::new(80, 24, 1_000).unwrap();
         // ESC[31m = set fg red; write 'X'; ESC[m = reset
         backend.process(b"\x1b[31mX\x1b[m");
         let snap = backend.screen_snapshot();

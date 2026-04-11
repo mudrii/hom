@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use hom_core::HomResult;
 use hom_db::HomDb;
+use hom_db::workflow::SaveStepRecord;
 use hom_workflow::{CheckpointStore, StepResultRecord};
 
 /// Wrapper around `HomDb` that implements `CheckpointStore`.
@@ -44,16 +45,18 @@ impl CheckpointStore for DbCheckpointStore {
         let id = uuid::Uuid::new_v4().to_string();
         hom_db::workflow::save_step(
             self.db.pool(),
-            &id,
-            record.workflow_id,
-            record.step_id,
-            record.harness,
-            record.model,
-            record.status,
-            record.prompt,
-            record.output,
-            record.duration_ms,
-            record.attempt,
+            SaveStepRecord {
+                id: &id,
+                workflow_id: record.workflow_id,
+                step_name: record.step_id,
+                harness: record.harness,
+                model: record.model,
+                status: record.status,
+                prompt: record.prompt,
+                output: record.output,
+                duration_ms: record.duration_ms,
+                attempt: record.attempt,
+            },
         )
         .await
     }

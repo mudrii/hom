@@ -21,10 +21,12 @@ use tracing_subscriber::EnvFilter;
 
 use hom_core::{HarnessType, HomConfig, LayoutKind, TerminalBackend};
 use hom_mcp::McpServer;
-use hom_tui::app::App;
+use hom_tui::app::{App, PaneSpawnRequest, RemotePaneSpawnRequest};
 use hom_tui::input::Action;
 use hom_tui::render::render;
-use hom_tui::workflow_bridge::{WorkflowBridge, WorkflowRequest, WorkflowRequestRx};
+use hom_tui::workflow_bridge::{
+    WorkflowBridge, WorkflowLaunchRx, WorkflowLauncher, WorkflowRequest, WorkflowRequestRx,
+};
 use hom_tui::workflow_progress::WorkflowProgress;
 
 #[derive(Parser)]
@@ -176,6 +178,8 @@ async fn main() -> anyhow::Result<()> {
     // Create workflow bridge channel for executor ↔ TUI communication
     let (bridge, workflow_rx) = WorkflowBridge::new();
     let bridge = Arc::new(bridge);
+    let (workflow_launcher, workflow_launch_rx) = WorkflowLauncher::new();
+    app.workflow_launcher = Some(workflow_launcher.clone());
 
     // Wire CLI --run/--var: if a workflow was specified, launch it
     if let Some(workflow_name) = &cli.run {
@@ -188,13 +192,20 @@ async fn main() -> anyhow::Result<()> {
                     def.steps.iter().map(|s| s.id.clone()).collect(),
                 ));
                 let variables: HashMap<String, String> = cli.vars.iter().cloned().collect();
-                let db = app.db.clone();
-                let bridge_clone = bridge.clone();
-                let wf_name = workflow_name.clone();
-                tokio::spawn(async move {
-                    run_workflow_task(def, bridge_clone, variables, db, &wf_name).await;
-                });
-                info!(workflow = %workflow_name, vars = ?cli.vars, "workflow launched via CLI");
+                match workflow_launcher.launch(def, variables, workflow_path.display().to_string())
+                {
+                    Ok(workflow_id) => {
+                        info!(
+                            workflow = %workflow_name,
+                            workflow_id,
+                            vars = ?cli.vars,
+                            "workflow launched via CLI"
+                        );
+                    }
+                    Err(e) => {
+                        app.command_bar.last_error = Some(format!("workflow launch error: {e}"));
+                    }
+                }
             }
             Err(e) => {
                 warn!(workflow = %workflow_name, error = %e, "failed to load CLI workflow");
@@ -203,7 +214,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let result = run_app(&mut terminal, &mut app, tick_rate, workflow_rx, bridge).await;
+    let result = run_app(
+        &mut terminal,
+        &mut app,
+        tick_rate,
+        workflow_rx,
+        workflow_launch_rx,
+        bridge,
+        workflow_launcher,
+    )
+    .await;
 
     // Clean up all PTY processes before restoring the terminal
     app.shutdown();
@@ -230,7 +250,9 @@ async fn run_app(
     app: &mut App,
     tick_rate: Duration,
     mut workflow_rx: WorkflowRequestRx,
+    mut workflow_launch_rx: WorkflowLaunchRx,
     bridge: Arc<WorkflowBridge>,
+    workflow_launcher: WorkflowLauncher,
 ) -> anyhow::Result<()> {
     // Cost polling: query total_cost from DB roughly every second.
     let (cost_tx, mut cost_rx) = tokio::sync::mpsc::unbounded_channel::<f64>();
@@ -258,6 +280,22 @@ async fn run_app(
         // Drain workflow bridge requests (non-blocking)
         while let Ok(req) = workflow_rx.try_recv() {
             handle_workflow_request(app, req, terminal.size()?.into());
+        }
+
+        while let Ok(req) = workflow_launch_rx.try_recv() {
+            let db = app.db.clone();
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                run_workflow_task(
+                    req.def,
+                    bridge,
+                    req.variables,
+                    db,
+                    &req.definition_path,
+                    Some(req.workflow_id),
+                )
+                .await;
+            });
         }
 
         // Dispatch pending MCP requests (up to 16 per tick)
@@ -321,7 +359,7 @@ async fn run_app(
                 }
                 Action::CommandBarInput(key) => {
                     if let Some(cmd) = app.command_bar.handle_key(key) {
-                        handle_command(app, cmd, size, &bridge)?;
+                        handle_command(app, cmd, size, &workflow_launcher)?;
                     }
                 }
                 Action::NextPane => app.focus_next(),
@@ -340,10 +378,10 @@ async fn run_app(
         if !token_events.is_empty()
             && let Some(ref db) = app.db
         {
-            for (pane_id, harness_type, event) in &token_events {
+            for (pane_id, harness, event) in &token_events {
                 if let hom_core::HarnessEvent::TokenUsage { input, output } = event {
                     let db = db.clone();
-                    let harness = harness_type.display_name().to_string();
+                    let harness = harness.clone();
                     let pane = *pane_id;
                     let inp = *input as i64;
                     let out = *output as i64;
@@ -387,7 +425,9 @@ async fn run_app(
                     && let Some(sideband) = &pane.sideband
                 {
                     let sideband = sideband.clone();
-                    let harness_name = pane.harness_type.display_name().to_string();
+                    let harness_name = app
+                        .pane_display_name(*pane_id)
+                        .unwrap_or_else(|| format!("pane #{pane_id}"));
                     let pid = *pane_id;
                     let tx = health_tx.clone();
                     tokio::spawn(async move {
@@ -415,9 +455,7 @@ async fn run_app(
             // Notify the user in the command bar so they see it immediately,
             // even if they are not looking at the affected pane.
             let harness_name = app
-                .panes
-                .get(pane_id)
-                .map(|p| p.harness_type.display_name().to_string())
+                .pane_display_name(*pane_id)
                 .unwrap_or_else(|| format!("pane #{pane_id}"));
             app.command_bar.last_error = Some(format!(
                 "pane #{pane_id} ({harness_name}) exited with code {exit_code}"
@@ -450,7 +488,7 @@ fn handle_command(
     app: &mut App,
     cmd: hom_tui::command_bar::Command,
     terminal_size: ratatui::layout::Rect,
-    bridge: &Arc<WorkflowBridge>,
+    workflow_launcher: &WorkflowLauncher,
 ) -> anyhow::Result<()> {
     use hom_tui::command_bar::Command;
 
@@ -468,7 +506,15 @@ fn handle_command(
                 match harness {
                     Some(ht) => {
                         let (cols, rows) = app.focused_pane_dimensions();
-                        match app.spawn_remote_pane(ht, model, target, cols, rows) {
+                        match app.spawn_remote_pane_with_opts(RemotePaneSpawnRequest {
+                            harness_type: ht,
+                            model,
+                            working_dir,
+                            extra_args,
+                            target,
+                            cols,
+                            rows,
+                        }) {
                             Ok(id) => info!(pane_id = id, "remote pane spawned"),
                             Err(e) => {
                                 app.command_bar.last_error =
@@ -485,15 +531,15 @@ fn handle_command(
             } else {
                 let cols = terminal_size.width.saturating_sub(2);
                 let rows = terminal_size.height.saturating_sub(6);
-                match app.spawn_pane_with_opts(
+                match app.spawn_pane_with_opts(PaneSpawnRequest {
                     harness,
-                    &harness_name,
+                    harness_name,
                     model,
                     working_dir,
                     extra_args,
                     cols,
                     rows,
-                ) {
+                }) {
                     Ok(id) => info!(pane_id = id, "spawned pane"),
                     Err(e) => {
                         app.command_bar.last_error = Some(format!("{e}"));
@@ -549,18 +595,9 @@ fn handle_command(
         }
         Command::Send { target, input } => {
             if let Some(id) = resolve_selector(&target, app) {
-                // Use adapter translation so the prompt is formatted correctly
-                // for the target harness (e.g. proper escaping, newline appended).
-                let bytes = if let Some(pane) = app.panes.get(&id) {
-                    let adapter = app.adapter_registry.get(&pane.harness_type);
-                    adapter
-                        .map(|a| {
-                            a.translate_input(&hom_core::OrchestratorCommand::Prompt(input.clone()))
-                        })
-                        .unwrap_or_else(|| format!("{input}\n").into_bytes())
-                } else {
-                    format!("{input}\n").into_bytes()
-                };
+                let bytes = app
+                    .translate_input_for_pane(id, &hom_core::OrchestratorCommand::Prompt(input))
+                    .unwrap_or_default();
                 let _ = app.pty_write(id, &bytes);
                 info!(pane_id = id, "sent input to pane");
             } else {
@@ -571,17 +608,12 @@ fn handle_command(
         Command::Broadcast(msg) => {
             let pane_ids: Vec<hom_core::PaneId> = app.pane_order.clone();
             for pane_id in &pane_ids {
-                // Use adapter translation per-pane so each harness gets correctly formatted input
-                let bytes = if let Some(pane) = app.panes.get(pane_id) {
-                    let adapter = app.adapter_registry.get(&pane.harness_type);
-                    adapter
-                        .map(|a| {
-                            a.translate_input(&hom_core::OrchestratorCommand::Prompt(msg.clone()))
-                        })
-                        .unwrap_or_else(|| format!("{msg}\n").into_bytes())
-                } else {
-                    format!("{msg}\n").into_bytes()
-                };
+                let bytes = app
+                    .translate_input_for_pane(
+                        *pane_id,
+                        &hom_core::OrchestratorCommand::Prompt(msg.clone()),
+                    )
+                    .unwrap_or_default();
                 let _ = app.pty_write(*pane_id, &bytes);
             }
             info!(
@@ -592,7 +624,7 @@ fn handle_command(
         Command::Run {
             workflow,
             variables,
-        } => handle_run(app, workflow, variables, bridge)?,
+        } => handle_run(app, workflow, variables, workflow_launcher)?,
         Command::Save(name) => handle_save(app, name),
         Command::Restore(name) => handle_restore(app, name, terminal_size),
     }
@@ -630,17 +662,11 @@ fn handle_pipe(
     match (source_id, target_id) {
         (Some(src), Some(tgt)) => {
             let output = if let Some(pane) = app.panes.get(&src) {
-                let snapshot = pane.terminal.screen_snapshot();
-                // Try adapter's parse_screen() for structured output
-                let events = app
-                    .adapter_registry
-                    .get(&pane.harness_type)
-                    .map(|a| a.parse_screen(&snapshot))
-                    .unwrap_or_default();
+                let events = app.parse_screen_for_pane(src);
                 if events.is_empty() {
                     // Fallback: use last N lines of raw screen text
                     // (avoids sending blank padding and scroll history)
-                    snapshot.last_n_lines(20)
+                    pane.terminal.screen_snapshot().last_n_lines(20)
                 } else {
                     // Format structured events as newline-separated text
                     events
@@ -653,17 +679,9 @@ fn handle_pipe(
                 String::new()
             };
 
-            // Use adapter translation for the target pane
-            let bytes = if let Some(tgt_pane) = app.panes.get(&tgt) {
-                let adapter = app.adapter_registry.get(&tgt_pane.harness_type);
-                adapter
-                    .map(|a| {
-                        a.translate_input(&hom_core::OrchestratorCommand::Prompt(output.clone()))
-                    })
-                    .unwrap_or_else(|| format!("{output}\n").into_bytes())
-            } else {
-                format!("{output}\n").into_bytes()
-            };
+            let bytes = app
+                .translate_input_for_pane(tgt, &hom_core::OrchestratorCommand::Prompt(output))
+                .unwrap_or_default();
             let _ = app.pty_write(tgt, &bytes);
             info!(source = src, target = tgt, "piped output between panes");
         }
@@ -678,7 +696,7 @@ fn handle_run(
     app: &mut App,
     workflow: String,
     variables: HashMap<String, String>,
-    bridge: &Arc<WorkflowBridge>,
+    workflow_launcher: &WorkflowLauncher,
 ) -> anyhow::Result<()> {
     // Load workflow from config workflow dir
     let workflow_dir = app.config.workflow_dir();
@@ -696,13 +714,15 @@ fn handle_run(
                     vars = ?variables,
                     "workflow loaded, launching executor"
                 );
-                // Spawn the workflow executor in a background task
-                let bridge_clone = bridge.clone();
-                let db = app.db.clone();
-                let wf_name = workflow.clone();
-                tokio::spawn(async move {
-                    run_workflow_task(def, bridge_clone, variables, db, &wf_name).await;
-                });
+                match workflow_launcher.launch(def, variables, workflow_path.display().to_string())
+                {
+                    Ok(workflow_id) => {
+                        info!(workflow = %workflow, workflow_id, "workflow queued");
+                    }
+                    Err(e) => {
+                        app.command_bar.last_error = Some(format!("workflow launch error: {e}"));
+                    }
+                }
             }
             Err(e) => {
                 app.command_bar.last_error = Some(format!("workflow parse error: {e}"));
@@ -764,9 +784,45 @@ fn handle_restore(app: &mut App, name: String, terminal_size: ratatui::layout::R
                     let cols = terminal_size.width.saturating_sub(2);
                     let rows = terminal_size.height.saturating_sub(6);
                     for pc in &pane_configs {
-                        if let Err(e) =
-                            app.spawn_pane(pc.harness_type, pc.model.clone(), cols, rows)
-                        {
+                        let result = match (&pc.plugin_name, &pc.pane_kind) {
+                            (Some(plugin_name), hom_core::PaneKind::Local) => app
+                                .spawn_pane_with_opts(PaneSpawnRequest {
+                                    harness: None,
+                                    harness_name: plugin_name.clone(),
+                                    model: pc.model.clone(),
+                                    working_dir: Some(pc.working_dir.clone()),
+                                    extra_args: pc.extra_args.clone(),
+                                    cols,
+                                    rows,
+                                }),
+                            (None, hom_core::PaneKind::Local) => {
+                                app.spawn_pane_with_opts(PaneSpawnRequest {
+                                    harness: Some(pc.harness_type),
+                                    harness_name: pc.harness_type.default_binary().to_string(),
+                                    model: pc.model.clone(),
+                                    working_dir: Some(pc.working_dir.clone()),
+                                    extra_args: pc.extra_args.clone(),
+                                    cols,
+                                    rows,
+                                })
+                            }
+                            (None, hom_core::PaneKind::Remote(target)) => app
+                                .spawn_remote_pane_with_opts(RemotePaneSpawnRequest {
+                                    harness_type: pc.harness_type,
+                                    model: pc.model.clone(),
+                                    working_dir: Some(pc.working_dir.clone()),
+                                    extra_args: pc.extra_args.clone(),
+                                    target: target.clone(),
+                                    cols,
+                                    rows,
+                                }),
+                            (Some(plugin_name), hom_core::PaneKind::Remote(_)) => {
+                                Err(hom_core::HomError::Other(format!(
+                                    "cannot restore remote plugin pane '{plugin_name}'"
+                                )))
+                            }
+                        };
+                        if let Err(e) = result {
                             warn!(error = %e, "failed to restore pane");
                         }
                     }
@@ -836,14 +892,12 @@ fn handle_workflow_request(
                     });
                 } else {
                     // No sideband — write to PTY and register for completion polling.
-                    let adapter = app.adapter_registry.get(&pane.harness_type);
-                    let bytes = adapter
-                        .map(|a| {
-                            a.translate_input(&hom_core::OrchestratorCommand::Prompt(
-                                prompt.clone(),
-                            ))
-                        })
-                        .unwrap_or_else(|| format!("{prompt}\n").into_bytes());
+                    let bytes = app
+                        .translate_input_for_pane(
+                            pane_id,
+                            &hom_core::OrchestratorCommand::Prompt(prompt.clone()),
+                        )
+                        .unwrap_or_default();
                     match app.pty_write(pane_id, &bytes) {
                         Ok(()) => {
                             app.pending_completions
@@ -881,7 +935,8 @@ async fn run_workflow_task(
     bridge: Arc<WorkflowBridge>,
     variables: HashMap<String, String>,
     db: Option<Arc<hom_db::HomDb>>,
-    workflow_name: &str,
+    definition_path: &str,
+    workflow_id: Option<String>,
 ) {
     let executor = hom_workflow::WorkflowExecutor::new();
 
@@ -892,7 +947,7 @@ async fn run_workflow_task(
 
     // Generate a single workflow ID used by both the DB row and the executor,
     // so that update_workflow_status targets the correct row.
-    let wf_id = uuid::Uuid::new_v4().to_string();
+    let wf_id = workflow_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Persist workflow start to DB
     if let Some(ref db) = db {
@@ -901,7 +956,7 @@ async fn run_workflow_task(
             db.pool(),
             &wf_id,
             &def.name,
-            workflow_name,
+            definition_path,
             "running",
             &vars_json,
         )
@@ -914,7 +969,7 @@ async fn run_workflow_task(
     let result = match &checkpoint_store {
         Some(store) => {
             executor
-                .execute_with_id(&def, bridge, variables, Some(store), wf_id)
+                .execute_with_id(&def, bridge, variables, Some(store), wf_id.clone())
                 .await
         }
         None => executor.execute(&def, bridge, variables).await,
@@ -929,29 +984,31 @@ async fn run_workflow_task(
                 "workflow completed"
             );
             if let Some(ref db) = db {
-                // Update workflow status
-                let status_str = format!("{:?}", wf_result.status);
+                let status_str = match wf_result.status {
+                    hom_workflow::executor::WorkflowStatus::Completed => "completed",
+                    hom_workflow::executor::WorkflowStatus::Aborted => "aborted",
+                    hom_workflow::executor::WorkflowStatus::Failed { .. } => "failed",
+                };
                 let _ = hom_db::workflow::update_workflow_status(
                     db.pool(),
                     &wf_result.workflow_id,
-                    &status_str,
+                    status_str,
                     None,
                 )
                 .await;
-
-                // Log cost for each completed step
-                for (step_id, step_result) in &wf_result.step_results {
-                    if step_result.status == hom_workflow::executor::StepStatus::Completed
-                        && let Err(e) =
-                            hom_db::cost::log_cost(db.pool(), 0, step_id, None, 0, 0, 0.0).await
-                    {
-                        warn!(step = %step_id, error = %e, "cost logging failed");
-                    }
-                }
             }
         }
         Err(e) => {
-            error!(workflow = %workflow_name, error = %e, "workflow execution failed");
+            if let Some(ref db) = db {
+                let _ = hom_db::workflow::update_workflow_status(
+                    db.pool(),
+                    &wf_id,
+                    "failed",
+                    Some(&e.to_string()),
+                )
+                .await;
+            }
+            error!(workflow = %definition_path, error = %e, "workflow execution failed");
         }
     }
 }

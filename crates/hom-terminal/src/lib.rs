@@ -12,6 +12,9 @@
 
 pub mod color_map;
 
+use hom_core::HomResult;
+use hom_core::TerminalBackend;
+
 #[cfg(feature = "ghostty-backend")]
 pub mod ghostty;
 
@@ -34,7 +37,14 @@ compile_error!(
 
 /// Convenience constructor: create a terminal with the active backend.
 #[cfg(any(feature = "vt100-backend", feature = "ghostty-backend"))]
-pub fn create_terminal(cols: u16, rows: u16, scrollback: usize) -> ActiveBackend {
-    use hom_core::TerminalBackend;
-    ActiveBackend::new(cols, rows, scrollback)
+pub fn create_terminal(cols: u16, rows: u16, scrollback: usize) -> HomResult<ActiveBackend> {
+    #[cfg(feature = "ghostty-backend")]
+    {
+        ghostty::GhosttyBackend::new(cols, rows, scrollback)
+    }
+
+    #[cfg(all(feature = "vt100-backend", not(feature = "ghostty-backend")))]
+    {
+        fallback_vt100::Vt100Backend::new(cols, rows, scrollback)
+    }
 }

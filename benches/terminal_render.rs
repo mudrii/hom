@@ -9,7 +9,7 @@ use hom_core::TerminalBackend;
 
 /// Benchmark the cost of processing PTY output through the vt100 backend.
 fn bench_terminal_process(c: &mut Criterion) {
-    let mut terminal = hom_terminal::create_terminal(120, 40, 5_000);
+    let mut terminal = hom_terminal::create_terminal(120, 40, 5_000).unwrap();
 
     // Simulate a typical PTY output burst — mixed text and ANSI escapes
     let data: Vec<u8> = (0..4096)
@@ -29,7 +29,7 @@ fn bench_terminal_process(c: &mut Criterion) {
 
 /// Benchmark taking a screen snapshot (the operation done every render frame).
 fn bench_screen_snapshot(c: &mut Criterion) {
-    let mut terminal = hom_terminal::create_terminal(120, 40, 5_000);
+    let mut terminal = hom_terminal::create_terminal(120, 40, 5_000).unwrap();
 
     // Fill the terminal with some content
     let fill: Vec<u8> = (0..4800)
@@ -47,7 +47,7 @@ fn bench_screen_snapshot(c: &mut Criterion) {
 
 /// Benchmark the full render cycle: process + snapshot + text extraction.
 fn bench_render_cycle(c: &mut Criterion) {
-    let mut terminal = hom_terminal::create_terminal(120, 40, 5_000);
+    let mut terminal = hom_terminal::create_terminal(120, 40, 5_000).unwrap();
 
     let data: Vec<u8> = (0..2048)
         .map(|i| if i % 120 == 119 { b'\n' } else { b'Z' })
@@ -69,7 +69,8 @@ fn bench_startup(c: &mut Criterion) {
     c.bench_function("startup_config_and_terminal", |b| {
         b.iter(|| {
             let config = hom_core::HomConfig::load().unwrap_or_default();
-            let terminal = hom_terminal::create_terminal(120, 40, config.general.max_scrollback);
+            let terminal =
+                hom_terminal::create_terminal(120, 40, config.general.max_scrollback).unwrap();
             black_box((config, terminal));
         });
     });
@@ -80,7 +81,7 @@ fn bench_startup(c: &mut Criterion) {
 fn bench_memory_per_pane(c: &mut Criterion) {
     c.bench_function("pane_memory_120x40_10k_scrollback", |b| {
         b.iter(|| {
-            let mut terminal = hom_terminal::create_terminal(120, 40, 5_000);
+            let mut terminal = hom_terminal::create_terminal(120, 40, 5_000).unwrap();
             // Fill terminal with a full screen of content
             let data: Vec<u8> = (0..4800)
                 .map(|i| if i % 120 == 119 { b'\n' } else { b'A' })

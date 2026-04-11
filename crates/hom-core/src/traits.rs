@@ -135,7 +135,7 @@ pub enum TermColor {
 /// Implementations: `GhosttyBackend` (primary), `Vt100Backend` (fallback).
 pub trait TerminalBackend: Send + Sync {
     /// Create a new terminal with the given dimensions.
-    fn new(cols: u16, rows: u16, scrollback: usize) -> Self
+    fn new(cols: u16, rows: u16, scrollback: usize) -> HomResult<Self>
     where
         Self: Sized;
 
