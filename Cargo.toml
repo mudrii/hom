@@ -24,14 +24,19 @@ keywords = ["tui", "ai-coding", "terminal", "orchestrator", "multiplexer"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.85"
 
+[features]
+default = ["ghostty-backend"]
+ghostty-backend = ["hom-terminal/ghostty-backend", "hom-tui/ghostty-backend"]
+vt100-backend = ["hom-terminal/vt100-backend", "hom-tui/vt100-backend"]
+
 [workspace.dependencies]
 # Internal crates
 hom-core = { path = "crates/hom-core" }
-hom-terminal = { path = "crates/hom-terminal" }
+hom-terminal = { path = "crates/hom-terminal", default-features = false }
 hom-pty = { path = "crates/hom-pty" }
 hom-adapters = { path = "crates/hom-adapters" }
 hom-workflow = { path = "crates/hom-workflow" }
-hom-tui = { path = "crates/hom-tui" }
+hom-tui = { path = "crates/hom-tui", default-features = false }
 hom-db = { path = "crates/hom-db" }
 hom-mcp = { path = "crates/hom-mcp" }
 hom-web = { path = "crates/hom-web" }

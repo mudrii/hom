@@ -47,14 +47,16 @@ A full working product that can:
 
 ### 2.2 Non-Functional Requirements
 
-| ID | Requirement | Target | Measured (vt100, 5k scrollback) |
-|----|-------------|--------|----------------------------------|
-| NF1 | Rendering latency | < 16ms per frame (60fps capable) | **47µs** ✅ (340× headroom) |
-| NF2 | Input-to-pane latency | < 50ms keystroke delivery | **12.8µs / 1000 keys** ✅ |
-| NF3 | Memory per pane (terminal emulation) | < 30MB including scrollback | **20.2MB** ✅ (default 5k scrollback) |
-| NF4 | Startup time | < 500ms to first render | **9.3µs config+terminal init** ✅ |
-| NF5 | Supported harnesses | 7 (all listed) | **7** ✅ |
-| NF6 | Platform support | Linux and macOS | macOS validated ✅ |
+| ID | Requirement | Target | Current Evidence |
+|----|-------------|--------|------------------|
+| NF1 | Rendering latency | < 16ms per frame (60fps capable) | **47µs** renderer microbenchmark on vt100 with 5k scrollback. Strong evidence, but still a microbenchmark rather than an end-to-end UI latency measurement. |
+| NF2 | Input-to-pane latency | < 50ms keystroke delivery | **12.8µs / 1000 keys** input encoding microbenchmark. Useful signal, but not a full end-to-end keystroke delivery measurement. |
+| NF3 | Memory per pane (terminal emulation) | < 30MB including scrollback | **20.2MB** measured at default 5k scrollback. |
+| NF4 | Startup time | < 500ms to first render | **9.3µs** config plus terminal-init microbenchmark. This does not fully measure end-to-end time to first render. |
+| NF5 | Supported harnesses | 7 (all listed) | **7** implemented in `hom-adapters`. |
+| NF6 | Platform support | Linux and macOS | Linux CI covers vt100 fallback paths. macOS compile and subsystem validation exist, but native-link heavy local test paths depend on the host toolchain/runtime setup. |
+
+Benchmark caveat: the measured numbers above are a mix of microbenchmarks and subsystem checks. They are useful evidence, but they should not be read as a complete replacement for end-to-end product-level latency and startup measurements.
 
 ### 2.3 Constraints
 
@@ -577,9 +579,9 @@ Parses and executes orchestrator-level commands:
 | `:pipe` | `:pipe 1 -> 2` | Implemented — pipes screen snapshot text from source to target PTY |
 | `:broadcast` | `:broadcast "stop"` | Implemented — adapter-translated per-pane |
 | `:run` | `:run code-review --var task="add auth"` | Implemented — parses YAML, validates DAG, spawns WorkflowExecutor via WorkflowBridge |
-| `:layout` | `:layout grid \| hsplit \| vsplit` | Implemented — recomputes areas, resizes all PTYs |
-| `:save` | `:save my-session` | Implemented — serialises pane layout + harness config to SQLite |
-| `:restore` | `:restore my-session` | Implemented — loads session from SQLite and re-spawns panes |
+| `:layout` | `:layout grid \| hsplit \| vsplit \| tabs \| single` | Implemented — recomputes areas, resizes all PTYs |
+| `:save` | `:save my-session` | Implemented — serialises pane layout plus pane transport/plugin metadata to SQLite |
+| `:restore` | `:restore my-session` | Implemented — restores local, remote, and plugin pane metadata before re-spawning panes |
 | `:help` | `:help` | Implemented — lists all commands |
 | `:quit` | `:quit` | Implemented |
 
@@ -663,10 +665,12 @@ fn render_pane(frame: &mut Frame, area: Rect, pane: &Pane, focused: bool) {
 }
 ```
 
-**Layout engine** (`layout.rs`) supports three modes:
+**Layout engine** (`layout.rs`) supports five modes:
+- `Single` — show only the first pane
 - `HSplit` — horizontal split (panes stacked vertically)
 - `VSplit` — vertical split (panes side by side)
 - `Grid` — automatic grid based on pane count
+- `Tabbed` — all panes share one area and only the focused pane is rendered
 
 ### 4.8 Web UI
 
@@ -684,7 +688,7 @@ hom-tui (tick loop)
 
 - **`--web` flag** — enables the web server at startup; binds `localhost:4242` by default
 - **`--web-port <N>` flag** — overrides the bind port
-- **`WebFrame`** — serialised `ScreenSnapshot`: rows of cells with character, fg/bg color (ANSI 256-color palette), and text attributes
+- **`WebFrame`** — serialised pane snapshot: `WebFrame { ts, panes: Vec<WebPane> }`
 - **Canvas2D renderer** — XSS-safe (`fillText`, no `innerHTML`); renders the full ANSI 256-color palette
 - **Keyboard input** — browser keystrokes are forwarded to the target pane via a `WebInput` channel; routed by `pane_id` so the web client can target any pane, not just the focused one
 - **Error handling** — `WebServer::run()` returns `anyhow::Result<()>`; bind/serve errors are propagated and logged, not panicked
@@ -695,7 +699,7 @@ hom-tui (tick loop)
 /// A single cell in a pane's screen buffer.
 pub struct WebCell {
     pub ch: char,
-    pub fg: u32,      // RRGGBB packed; 0xFFFFFF = terminal default
+    pub fg: u32,      // RRGGBB packed or DEFAULT_FG_SENTINEL
     pub bg: u32,
     pub bold: bool,
     pub italic: bool,
@@ -743,7 +747,7 @@ Remote panes run a harness process on a remote machine over SSH, bridging the re
 - **`RemoteTarget`** — parsed from `user@host[:port]`; stored in `PaneKind::Remote(RemoteTarget)`
 - **`RemotePtyManager`** in `crates/hom-pty/src/remote.rs` — uses `ssh2 = "0.9"` to establish an SSH session, open a channel with a PTY, and spawn the remote harness command
 - **Auth chain** — tried in order: SSH agent (via `$SSH_AUTH_SOCK`) → `~/.ssh/id_ed25519` → `~/.ssh/id_rsa`
-- **Remote command** — the harness `CommandSpec` is shell-quoted via `RemoteTarget::shell_quote()` before being sent to the remote SSH channel; no environment variables are forwarded (no `setenv` calls)
+- **Remote command** — the harness `CommandSpec` is shell-quoted via `RemoteTarget::shell_quote()` before being sent to the remote SSH channel; configured environment variables are forwarded with `ssh2::Channel::setenv()`
 - **PTY bridging** — the `RemotePtyManager` exposes the same read/write/resize interface as the local `PtyManager`; the rest of the TUI stack (terminal emulation, rendering, input routing) is unaware of the transport
 
 **Key types (`hom-core`):**
@@ -775,7 +779,7 @@ pub enum PaneKind {
 |------|-------------|
 | `spawn_pane` | Spawn a new harness pane; returns `pane_id` |
 | `send_to_pane` | Send text to a pane's stdin |
-| `run_workflow` | Trigger a YAML workflow by path; returns diagnostic |
+| `run_workflow` | Trigger a YAML workflow by path; returns `workflow_id` |
 | `list_panes` | Return all active pane IDs and harness types |
 | `get_pane_output` | Return the last N lines of a pane's screen snapshot |
 | `kill_pane` | Kill a pane by ID |
@@ -1003,11 +1007,9 @@ The render FPS from `config.general.render_fps` controls the tick rate of the ma
 ```
 hom/
 ├── Cargo.toml                    # Workspace root (Rust 2024 edition, 10 crates)
-├── CLAUDE.md                     # Development rules and project context
+├── AGENTS.md                     # Codex-compatible repo instructions and skill routing
+├── CLAUDE.md                     # Project context and original development rules
 ├── hom-system-design.md          # This document
-├── .claude/
-│   ├── rules/rust-patterns.md    # Rust style, API, type, and readability patterns
-│   └── skills/rust-rig/SKILL.md  # Execution discipline: ATDD/TDD, DI, review workflow
 ├── config/
 │   └── default.toml              # Default configuration (compiled in via include_str!)
 ├── workflows/                    # Built-in workflow templates (8 total)
@@ -1081,7 +1083,7 @@ hom/
 │   │   ├── Cargo.toml            # depends on ratatui, crossterm, hom-core…hom-web
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── app.rs            # App state, spawn_pane, pty_write, poll_pty_output
+│   │       ├── app.rs            # App state, pane transport/plugin metadata, spawn/restore, PTY polling
 │   │       ├── render.rs         # Frame rendering, welcome screen
 │   │       ├── pane_render.rs    # Cell-by-cell terminal → ratatui mapping
 │   │       ├── input.rs          # InputRouter: pane input vs command bar vs WorkflowControl
@@ -1111,11 +1113,12 @@ hom/
 │   │       └── tools.rs          # tool_list() — 6 exposed tools
 │   │
 │   ├── hom-web/                  # WebSocket live pane viewer (--web flag)
-│   │   ├── Cargo.toml            # depends on axum, tokio-tungstenite
+│   │   ├── Cargo.toml            # depends on axum, tower, tower-http
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── server.rs         # WebServer: axum HTTP + WebSocket; broadcasts WebFrame
-│   │       └── frame.rs          # WebCell, WebPane, WebFrame, WebInput types
+│   │       ├── frame.rs          # WebCell, WebPane, WebFrame, WebInput types
+│   │       └── viewer.rs         # Single-page Canvas2D viewer HTML with WebSocket client
 │   │
 │   └── hom-plugin/               # C ABI plugin system
 │       ├── Cargo.toml            # depends on hom-core, libloading
@@ -1128,11 +1131,13 @@ hom/
 ├── src/
 │   └── main.rs                   # Binary entry point: CLI, event loop, command dispatch
 │
-├── skills/                       # Superpowers-compatible skill definitions
+├── skills/                       # Repo-local skills used by Codex and other agents
 │   ├── hom-adapter-development/SKILL.md
 │   ├── hom-tui-testing/SKILL.md
 │   ├── hom-workflow-authoring/SKILL.md
-│   └── hom-terminal-integration/SKILL.md
+│   ├── hom-terminal-integration/SKILL.md
+│   ├── hom-workspace-standards/SKILL.md
+│   └── rust-rig/SKILL.md
 │
 └── docs/superpowers/plans/       # Implementation plans
 ```
@@ -1211,44 +1216,24 @@ async-trait = "0.1"
 
 ---
 
-## 8. Remaining Work
+## 8. Implementation Status Snapshot
 
-| Area | Item | Status |
-|------|------|--------|
-| Terminal | GhosttyBackend implementation | **RESOLVED** — `libghostty-vt 0.1.1` fully wired; all trait methods implemented; 8 unit tests pass; `unsafe Send + Sync` with documented invariant |
-| Workflow | Parallel execution | **RESOLVED** — `Arc<dyn WorkflowRuntime>` + `JoinSet` for concurrent batch execution |
-| Workflow | SendAndWait completion | **RESOLVED** — `PendingCompletion` polling via `detect_completion()` |
-| Workflow | Sideband async bridge | **RESOLVED** — SendAndWait uses `sideband.send_prompt()` for sideband-capable panes |
-| Workflow | Template library | **RESOLVED** — 8 built-in templates: code-review, plan-execute-validate, multi-model-consensus, TDD, debugging, refactor-with-tests, documentation, parallel-analysis |
-| Adapters | `parse_screen()` | **RESOLVED** — all 7 adapters have real implementations (JSONL, screen text patterns) |
-| Adapters | RPC get_events() | **RESOLVED** — non-blocking `try_lock` + 1ms timeout; parses JSON-RPC notifications |
-| Adapters | `detect_completion()` | **RESOLVED** — `last_non_empty_line()` + anchored `starts_with()` patterns per adapter; error detection added |
-| Adapters | RPC sideband | **RESOLVED** — full JSON-RPC subprocess implementation with stdin/stdout communication |
-| Adapters | HTTP sideband | **RESOLVED** — SSE event polling via GET /global/event; in-module tests in `crates/hom-adapters/src/sideband/http.rs` |
-| Adapters | Copilot ACP | **RESOLVED** — `--acp --stdio` mode support, sideband via JSON-RPC |
-| Adapters | `build_command`/`translate_input` tests | **RESOLVED** — all 7 adapters have `build_command` (default, with model, binary override, extra args) and `translate_input` (prompt, cancel, accept, reject) tests; 91 total tests in hom-adapters |
-| DB | Session save/restore | **RESOLVED** — `:save`/`:restore` wired to `hom_db::session` CRUD with JSON serialization |
-| DB | Cost tracking | **RESOLVED** — `log_cost()` called from workflow steps and token usage events; total displayed in status rail (F10) |
-| DB | Fail-fast on error | **RESOLVED** — DB open failure exits with clear message; `--no-db` flag opts out explicitly |
-| Config | Env var expansion | **RESOLVED** — `${VAR}` interpolated in TOML values after loading |
-| Config | Keybinding config | **RESOLVED** — `KeybindingsConfig` applied to `InputRouter::from_config()`; invalid strings warned at startup |
-| TUI | Mouse passthrough | **RESOLVED** — `encode_mouse_event()` X10-encodes scroll/button events; `EnableMouseCapture`/`DisableMouseCapture` wired in main.rs; click-to-focus still works |
-| TUI | Cost display | **RESOLVED** — total cost polled from DB and shown as `$X.XX` in status rail (F10) |
-| TUI | Workflow progress | **RESOLVED** — `WorkflowProgress` type replaces stringly-typed status; step counts shown in status rail (F9) |
-| TUI | Graceful PTY shutdown | **RESOLVED** — `App::shutdown()` + `PtyManager::kill_all()` called on Ctrl-Q/`:quit` |
-| TUI | Process crash handling | **RESOLVED** — exited panes show `[EXITED: N]` in red; command bar notified; pending workflow steps unblocked |
-| TUI | Sideband health polling | **RESOLVED** — `health_check()` called every ~5s in main loop; notifies on failure |
-| TUI | AsyncPtyReader cancellation | **RESOLVED** — `abort()` method added; called in `kill_pane()` before pane removal |
-| TUI | Claude Code flickering | **DOCUMENTED** — Ink/React renderer causes 4,000-6,700 scroll events/sec in any multiplexer; headless workaround documented in `claude_code.rs` |
-| TUI | handle_command refactor | **RESOLVED** — per-command handler functions extracted; `handle_spawn`, `handle_save`, `handle_restore`, `handle_run`, etc. |
-| CI | GhosttyBackend CI job | **RESOLVED** — `ghostty` job in `.github/workflows/ci.yml` targets `[self-hosted, zig]` runner; `scripts/seed-zig-cache.sh` provisions Zig package cache |
-| Tests | E2E PTY pipeline | **RESOLVED** — spawn→read (echo), spawn→write→read (cat), PTY→Vt100→ScreenSnapshot |
-| Tests | Terminal emulator integration | **RESOLVED** — 6 vt100 unit tests (plain text, ANSI color, resize, cursor, scroll, attrs) + 4 async pipeline integration tests in `crates/hom-terminal/tests/async_pipeline.rs` |
-| Performance | NFR benchmarks | **VALIDATED** — all 4 measurable NFRs pass: NF1 47µs (<16ms), NF2 12.8µs/1kkeys (<50ms), NF3 20.2MB (<30MB at default 5k scrollback), NF4 9.3µs (<500ms) |
-| Web UI | WebSocket live pane viewer | **RESOLVED** — `hom-web` crate with axum 0.8; `WebFrame { ts, panes: Vec<WebPane> }` broadcast after each tick; Canvas2D cell renderer; per-pane keyboard input via `WebInput { pane_id, text }`; `--web` / `--web-port` flags |
-| Remote Pane | SSH remote harness spawning | **RESOLVED** — `RemoteTarget` + `PaneKind::Remote(RemoteTarget)`; `RemotePtyManager` in `hom-pty/src/remote.rs`; `ssh2 = "0.9"` dep; auth chain: agent → id_ed25519 → id_rsa; `:spawn <harness> --remote user@host[:port]` |
-| Plugin System | Runtime harness adapter loading | **RESOLVED** — `hom-plugin` crate; `HomPluginVtable` `#[repr(C)]` (9 fields, 72 bytes); `HomInputKind` `#[repr(u32)]`; `HOM_PLUGIN_ABI_VERSION: usize = 1` guard; `PluginLoader::scan_dir`; auto-scan `~/.config/hom/plugins/` at startup; `:load-plugin <path>` command |
-| MCP Server | JSON-RPC 2.0 tool provider | **RESOLVED** — `hom-mcp` crate; 6 tools (spawn_pane, send_to_pane, run_workflow, list_panes, get_pane_output, kill_pane); `--mcp` flag; channel-based IPC with App event loop |
+The major product areas described in this document are implemented in the current workspace:
+
+- Terminal layer: ghostty backend implemented, vt100 fallback implemented, async PTY pipeline tests present
+- Adapter layer: 7 built-in adapters registered, sideband HTTP/RPC support present, adapter tests pass
+- Workflow engine: DAG execution, concurrency, templating, retry, fallback, and checkpoint persistence support present
+- TUI layer: command bar, layout modes, workflow bridge, cost display, workflow progress, save/restore, mouse passthrough, and shutdown handling present
+- Web UI: axum WebSocket viewer with Canvas2D renderer and per-pane browser input present
+- Remote panes: SSH-backed remote PTY support present
+- MCP server: JSON-RPC 2.0 tool provider present
+- Plugin system: runtime adapter loading via stable C ABI present
+
+Known validation limits:
+
+- Native-link-heavy local test paths depend on the host macOS toolchain/runtime setup
+- Linux has CI coverage for vt100 fallback paths, but full product-level Linux validation remains future work
+- The NFR numbers in section 2.2 are best read as subsystem evidence rather than complete end-to-end product measurements
 
 ---
 
@@ -1306,50 +1291,25 @@ async-trait = "0.1"
 
 | Risk | Severity | Probability | Mitigation |
 |------|----------|-------------|------------|
-| libghostty-rs API breaking change | High | High (pre-1.0) | Pin commit hash; TerminalBackend trait abstraction; vt100 opt-in fallback available if ghostty API breaks |
-| Zig build fails on user's system | Medium | Low | Fallback build uses vt100 (no Zig needed): `--no-default-features --features vt100-backend`; README documents this clearly |
+| libghostty-rs API breaking change | High | High (pre-1.0) | Pin commit hash; TerminalBackend trait abstraction; vt100 fallback remains available |
+| Zig build fails on user's system | Medium | Low | Fallback build uses vt100: `--no-default-features --features vt100-backend`; CI exercises vt100 paths broadly |
 | Claude Code flickering in panes | Medium | Certain | Headless mode for workflows, visual for direct interaction only |
 | Screen parsing unreliable for output extraction | Medium | Medium | Start with prompt-based patterns, add sideband channels progressively |
-| PTY input race conditions | Medium | Medium | Wait for shell readiness, configurable delay, use CommandBuilder for initial commands |
-| Harness CLI updates break adapters | Low | Medium | Version-pin harness CLIs, adapter trait isolates changes, integration tests |
-| Performance with 7+ concurrent panes | Low | Low | Lazy rendering (only update visible panes), throttle PTY reads |
+| PTY input race conditions | Medium | Medium | Wait for shell readiness, use readiness detection, keep initial command construction explicit |
+| Harness CLI updates break adapters | Low | Medium | Adapter abstraction isolates changes; integration tests and per-adapter tests catch regressions |
+| Plugin loads arbitrary native code | High | Medium | Stable ABI checks, explicit plugin directory, documented trust boundary; do not treat plugins as sandboxed |
+| Remote pane execution fails or targets the wrong environment | Medium | Medium | Explicit `RemoteTarget`, shell quoting, auth-chain documentation, and clear transport separation in `PaneKind` |
+| Browser viewer exposes unintended local surface area | Medium | Low | Bind localhost by default, keep input routing explicit by pane ID, avoid HTML injection in the viewer |
+| Performance with many concurrent panes | Low | Low | Keep render path bounded, throttle PTY reads where needed, use fallback backends when native constraints dominate |
 
 ---
 
 ## 11. Future Directions
 
-**Resolved across all phases:**
-- ~~Wire session save/restore~~ → `:save`/`:restore` wired to hom-db (Phase 3)
-- ~~Wire cost tracking~~ → `log_cost()` from workflow + token events, displayed in status rail (Phase 3/4)
-- ~~Implement `parse_screen()`~~ → all 7 adapters have real implementations (Phase 3)
-- ~~Integration-test sideband channels~~ → HTTP sideband tested, RPC implemented (Phase 3)
-- ~~Parallel step execution~~ → `Arc<dyn WorkflowRuntime>` + JoinSet (Phase 3)
-- ~~SendAndWait completion detection~~ → PendingCompletion polling (Phase 3)
-- ~~Keybinding config wiring~~ → KeybindingsConfig applied to InputRouter (Phase 3)
-- ~~Workflow template library~~ → 8 built-in templates (Phase 4)
-- ~~Cost display in status rail~~ → total cost shown as `$X.XX` (Phase 4)
-- ~~Workflow progress tracking~~ → `WorkflowProgress` type + step counts in status rail (Phase 4)
-- ~~Terminal emulator integration tests~~ → 6 vt100 unit tests + 4 async pipeline integration tests (Phase 4)
-- ~~Graceful PTY shutdown~~ → `App::shutdown()` + `PtyManager::kill_all()` (Phase 5)
-- ~~Process crash handling~~ → `[EXITED: N]` in red (Phase 5)
-- ~~Database reliability~~ → fail fast on error, `--no-db` flag (Phase 5)
-- ~~detect_completion() reliability~~ → `last_non_empty_line()` + anchored patterns (Phase 6)
-- ~~E2E PTY pipeline tests~~ → spawn/read/write/Vt100 (Phase 6)
-- ~~Process exit notification~~ → command bar notified on harness exit (Phase 7)
-- ~~Sideband health polling~~ → `health_check()` every ~5s (Phase 7)
-- ~~Keybinding validation~~ → warns on invalid config at startup (Phase 7)
-- ~~AsyncPtyReader cancellation~~ → `abort()` on pane kill (Phase 7)
-- ~~GhosttyBackend implementation~~ → `libghostty-vt 0.1.1` fully wired (Phase 7)
-- ~~Mouse passthrough~~ → X10 encoding + `EnableMouseCapture` wired (P4 session)
-- ~~Adapter build_command/translate_input tests~~ → all 7 adapters at 91 tests total (P4 session)
-- ~~GhosttyBackend CI job~~ → `[self-hosted, zig]` runner + seed script (P4 session)
-
-- ~~Web UI~~ → `hom-web` crate with axum 0.8 WebSocket server + Canvas2D renderer (April 11, 2026)
-- ~~Remote pane support~~ → `RemotePtyManager` over ssh2, `:spawn --remote user@host[:port]` (April 11, 2026)
-- ~~Plugin system for adapters~~ → `hom-plugin` crate, `HomPluginVtable` C ABI, auto-scan at startup (April 11, 2026)
-
-**Active future work:**
-1. **Linux platform validation** — `cargo check` + test suite on Linux; NF6 target not yet validated
-2. **GPU rendering** — leverage libghostty's pipeline for complex output
-3. **Workflow marketplace** — share and discover templates
-4. **Agent-to-agent protocol** — standardized message format
+Active future work:
+1. **Linux product validation** — extend beyond vt100 CI coverage to full product-level validation paths
+2. **End-to-end performance measurement** — replace or supplement microbenchmarks with first-render and input-delivery measurements at the product boundary
+3. **GPU rendering** — leverage libghostty's rendering pipeline for complex output
+4. **Workflow marketplace** — share and discover workflow templates
+5. **Agent-to-agent protocol** — standardize structured inter-harness message passing
+6. **Plugin hardening** — improve documentation and possibly isolate the plugin trust boundary further if the extension ecosystem grows

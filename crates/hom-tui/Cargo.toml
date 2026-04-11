@@ -6,6 +6,13 @@ description = "TUI rendering, input routing, and pane layout management for HOM"
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Keep the standalone library/test path portable by default.
+# The top-level `hom` binary re-enables `ghostty-backend` as the product default.
+default = ["vt100-backend"]
+ghostty-backend = ["hom-terminal/ghostty-backend"]
+vt100-backend = ["hom-terminal/vt100-backend"]
+
 [dependencies]
 hom-core.workspace = true
 hom-terminal.workspace = true
@@ -25,3 +32,6 @@ async-trait.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 sqlx.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
