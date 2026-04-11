@@ -42,7 +42,7 @@ impl WorkflowCheckpoint {
                 .values()
                 .map(|r| CheckpointStep {
                     step_id: r.step_id.clone(),
-                    status: format!("{:?}", r.status),
+                    status: r.status.as_str().to_string(),
                     output: r.output.clone(),
                     attempt: r.attempt,
                 })
@@ -114,7 +114,7 @@ mod tests {
             .iter()
             .find(|step| step.step_id == "plan")
             .unwrap();
-        assert_eq!(restored_plan.status, "Completed");
+        assert_eq!(restored_plan.status, "completed");
         assert_eq!(restored_plan.output, "ship it");
         assert_eq!(restored_plan.attempt, 1);
     }

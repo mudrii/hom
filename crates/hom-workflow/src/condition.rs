@@ -27,6 +27,9 @@ pub fn evaluate_condition(
     // Split on `||` first (lower precedence), then `&&` within each clause.
     let or_clauses: Vec<&str> = split_outside_quotes(expr, "||");
     if or_clauses.len() > 1 {
+        if or_clauses.iter().any(|clause| clause.trim().is_empty()) {
+            return false;
+        }
         return or_clauses
             .iter()
             .any(|clause| evaluate_condition(clause, step_outputs, step_statuses));
@@ -34,6 +37,9 @@ pub fn evaluate_condition(
 
     let and_clauses: Vec<&str> = split_outside_quotes(expr, "&&");
     if and_clauses.len() > 1 {
+        if and_clauses.iter().any(|clause| clause.trim().is_empty()) {
+            return false;
+        }
         return and_clauses
             .iter()
             .all(|clause| evaluate_condition(clause, step_outputs, step_statuses));
@@ -54,21 +60,21 @@ fn evaluate_atomic(
     // Handle "contains" operator
     if let Some((lhs, rhs)) = expr.split_once(" contains ") {
         let lhs_val = resolve_value(lhs.trim(), step_outputs, step_statuses);
-        let rhs_val = rhs.trim().trim_matches('"');
+        let rhs_val = strip_quotes(rhs.trim());
         return lhs_val.contains(rhs_val);
     }
 
     // Handle "==" operator
     if let Some((lhs, rhs)) = expr.split_once("==") {
         let lhs_val = resolve_value(lhs.trim(), step_outputs, step_statuses);
-        let rhs_val = rhs.trim().trim_matches('"').trim();
+        let rhs_val = strip_quotes(rhs.trim()).trim();
         return lhs_val.trim() == rhs_val;
     }
 
     // Handle "!=" operator
     if let Some((lhs, rhs)) = expr.split_once("!=") {
         let lhs_val = resolve_value(lhs.trim(), step_outputs, step_statuses);
-        let rhs_val = rhs.trim().trim_matches('"').trim();
+        let rhs_val = strip_quotes(rhs.trim()).trim();
         return lhs_val.trim() != rhs_val;
     }
 
@@ -76,20 +82,38 @@ fn evaluate_atomic(
     !expr.is_empty() && expr != "false" && expr != "0"
 }
 
-/// Split a string on a delimiter, but only outside of double quotes.
+fn strip_quotes(s: &str) -> &str {
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Split a string on a delimiter, but only outside of quoted strings.
 fn split_outside_quotes<'a>(s: &'a str, delimiter: &str) -> Vec<&'a str> {
     let mut parts = Vec::new();
-    let mut in_quotes = false;
+    let mut in_single = false;
+    let mut in_double = false;
     let mut start = 0;
     let delim_len = delimiter.len();
     let bytes = s.as_bytes();
 
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'"' {
-            in_quotes = !in_quotes;
+        if bytes[i] == b'\'' && !in_double {
+            in_single = !in_single;
             i += 1;
-        } else if !in_quotes && i + delim_len <= bytes.len() && &s[i..i + delim_len] == delimiter {
+        } else if bytes[i] == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+        } else if !in_single
+            && !in_double
+            && i + delim_len <= bytes.len()
+            && &s[i..i + delim_len] == delimiter
+        {
             parts.push(&s[start..i]);
             i += delim_len;
             start = i;
@@ -222,5 +246,29 @@ mod tests {
             &outputs,
             &statuses,
         ));
+    }
+
+    #[test]
+    fn quoted_single_strings_do_not_split_on_operators() {
+        let mut outputs = HashMap::new();
+        outputs.insert("plan".to_string(), "alpha && beta || gamma".to_string());
+        let statuses = HashMap::new();
+
+        assert!(evaluate_condition(
+            "steps.plan.output contains '&& beta ||'",
+            &outputs,
+            &statuses,
+        ));
+    }
+
+    #[test]
+    fn degenerate_compound_inputs_are_false_except_empty_expr() {
+        let outputs = HashMap::new();
+        let statuses = HashMap::new();
+
+        assert!(evaluate_condition("", &outputs, &statuses));
+        assert!(!evaluate_condition("&&", &outputs, &statuses));
+        assert!(!evaluate_condition("a && ", &outputs, &statuses));
+        assert!(!evaluate_condition(" || ", &outputs, &statuses));
     }
 }

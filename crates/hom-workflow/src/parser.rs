@@ -155,29 +155,18 @@ impl WorkflowDef {
 
     /// Validate the workflow definition (unique IDs, valid deps, etc.).
     pub fn validate(&self) -> HomResult<()> {
-        let step_ids: Vec<&str> = self.steps.iter().map(|s| s.id.as_str()).collect();
-
         // Check for duplicate IDs
         let mut seen = std::collections::HashSet::new();
-        for id in &step_ids {
-            if !seen.insert(id) {
+        for step in &self.steps {
+            if !seen.insert(step.id.as_str()) {
                 return Err(HomError::WorkflowParseError(format!(
-                    "duplicate step ID: {id}"
+                    "duplicate step ID: {}",
+                    step.id
                 )));
             }
         }
 
-        // Check that all depends_on references exist
-        for step in &self.steps {
-            for dep in &step.depends_on {
-                if !step_ids.contains(&dep.as_str()) {
-                    return Err(HomError::WorkflowParseError(format!(
-                        "step '{}' depends on unknown step '{dep}'",
-                        step.id
-                    )));
-                }
-            }
-        }
+        crate::dag::WorkflowDag::from_steps(&self.steps)?;
 
         Ok(())
     }
@@ -229,5 +218,30 @@ steps:
             def.steps[0].on_failure.as_ref(),
             Some(FailureAction::Fallback(id)) if id == "recover"
         ));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_step_ids() {
+        let yaml = r#"
+name: duplicate-ids
+steps:
+  - id: shared
+    harness: claude
+    prompt: "one"
+  - id: shared
+    harness: claude
+    prompt: "two"
+"#;
+        let def = WorkflowDef::from_yaml(yaml).unwrap();
+        let err = def.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate step ID: shared"));
+    }
+
+    #[test]
+    fn parse_timeout_supports_seconds_minutes_and_plain_ints() {
+        assert_eq!(WorkflowDef::parse_timeout("15s"), Some(15));
+        assert_eq!(WorkflowDef::parse_timeout("2m"), Some(120));
+        assert_eq!(WorkflowDef::parse_timeout("45"), Some(45));
+        assert_eq!(WorkflowDef::parse_timeout("bogus"), None);
     }
 }

@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
+use std::sync::OnceLock;
 use tracing::debug;
 
 use hom_core::{HarnessEvent, HomError, HomResult, SidebandChannel};
@@ -25,11 +26,15 @@ pub struct HttpSideband {
     session_id: Option<String>,
 }
 
+static RUSTLS_PROVIDER_INSTALLED: OnceLock<()> = OnceLock::new();
+
 impl HttpSideband {
     pub fn new(base_url: String) -> Self {
         // Reqwest 0.13's `rustls-no-provider` feature expects the application to
         // install a process-wide rustls provider before the first client build.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        RUSTLS_PROVIDER_INSTALLED.get_or_init(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
 
         Self {
             base_url,
@@ -98,7 +103,13 @@ impl SidebandChannel for HttpSideband {
             return Ok(Vec::new());
         }
 
-        let body = resp.text().await.unwrap_or_default();
+        let body = match resp.text().await {
+            Ok(body) => body,
+            Err(e) => {
+                debug!(url, error = %e, "failed to read SSE response body");
+                return Ok(Vec::new());
+            }
+        };
         let mut events = Vec::new();
 
         // Parse SSE format: lines starting with "data: " contain JSON

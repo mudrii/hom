@@ -71,16 +71,16 @@ mod tests {
     use super::*;
     use hom_db::HomDb;
 
-    async fn open_temp_db() -> Arc<HomDb> {
+    async fn open_temp_db() -> (tempfile::TempDir, Arc<HomDb>) {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("hom.sqlite");
-        std::mem::forget(temp);
-        Arc::new(HomDb::open(db_path.to_str().unwrap()).await.unwrap())
+        let db = Arc::new(HomDb::open(db_path.to_str().unwrap()).await.unwrap());
+        (temp, db)
     }
 
     #[tokio::test]
     async fn save_checkpoint_persists_latest_json() {
-        let db = open_temp_db().await;
+        let (_temp, db) = open_temp_db().await;
         let store = DbCheckpointStore::new(db.clone());
 
         store
@@ -103,7 +103,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_step_result_writes_step_row() {
-        let db = open_temp_db().await;
+        let (_temp, db) = open_temp_db().await;
         let store = DbCheckpointStore::new(db.clone());
 
         hom_db::workflow::save_workflow(

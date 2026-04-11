@@ -7,7 +7,9 @@ pub mod cost;
 pub mod session;
 pub mod workflow;
 
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use std::path::Path;
+
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use tracing::info;
 
 use hom_core::{HomError, HomResult};
@@ -20,23 +22,30 @@ pub struct HomDb {
 impl HomDb {
     /// Open (or create) the database at the given path.
     pub async fn open(path: &str) -> HomResult<Self> {
+        Self::open_path(Path::new(path)).await
+    }
+
+    /// Open (or create) the database at the given filesystem path.
+    pub async fn open_path(path: &Path) -> HomResult<Self> {
         // Ensure parent directory exists
-        if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| HomError::DatabaseError(format!("create db dir: {e}")))?;
         }
 
-        let url = format!("sqlite:{path}?mode=rwc");
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(&url)
+            .connect_with(options)
             .await
             .map_err(|e| HomError::DatabaseError(format!("connect: {e}")))?;
 
         let db = Self { pool };
         db.run_migrations().await?;
 
-        info!(path, "database opened");
+        info!(path = %path.display(), "database opened");
         Ok(db)
     }
 

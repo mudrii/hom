@@ -35,6 +35,13 @@ impl WebServer {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
+        self.run_until_shutdown(std::future::pending()).await
+    }
+
+    pub async fn run_until_shutdown<F>(self, shutdown: F) -> anyhow::Result<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         let state = AppState {
             tx: self.tx,
             input_tx: self.input_tx,
@@ -46,7 +53,7 @@ impl WebServer {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| anyhow::anyhow!("web server bind on port {}: {e}", self.port))?;
-        serve_listener(listener, state).await
+        serve_listener(listener, state, shutdown).await
     }
 }
 
@@ -57,8 +64,16 @@ fn app_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn serve_listener(listener: tokio::net::TcpListener, state: AppState) -> anyhow::Result<()> {
+async fn serve_listener<F>(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     axum::serve(listener, app_router(state))
+        .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| anyhow::anyhow!("web server error: {e}"))?;
     Ok(())
@@ -124,6 +139,7 @@ mod tests {
         std::net::SocketAddr,
         broadcast::Sender<WebFrame>,
         mpsc::Receiver<WebInput>,
+        tokio::sync::oneshot::Sender<()>,
         tokio::task::JoinHandle<()>,
     ) {
         let (tx, _) = broadcast::channel(8);
@@ -137,12 +153,16 @@ mod tests {
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
-            let _ = serve_listener(listener, state).await;
+            let _ = serve_listener(listener, state, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
         });
 
         wait_until_ready(addr).await;
-        (addr, tx, input_rx, handle)
+        (addr, tx, input_rx, shutdown_tx, handle)
     }
 
     async fn wait_until_ready(addr: std::net::SocketAddr) {
@@ -179,18 +199,22 @@ mod tests {
 
     #[tokio::test]
     async fn root_route_serves_viewer_html() {
-        let (addr, _tx, _input_rx, handle) = spawn_test_server().await;
+        let (addr, _tx, _input_rx, shutdown_tx, handle) = spawn_test_server().await;
 
         let body = http_get(addr, "/").await;
         assert!(body.contains("HOM"));
         assert!(body.contains("/ws"));
 
-        handle.abort();
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
     async fn websocket_broadcasts_frames_to_clients() {
-        let (addr, tx, _input_rx, handle) = spawn_test_server().await;
+        let (addr, tx, _input_rx, shutdown_tx, handle) = spawn_test_server().await;
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
             .await
             .unwrap();
@@ -211,12 +235,16 @@ mod tests {
             other => panic!("unexpected websocket message: {other:?}"),
         }
 
-        handle.abort();
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
     async fn websocket_forwards_browser_input() {
-        let (addr, _tx, mut input_rx, handle) = spawn_test_server().await;
+        let (addr, _tx, mut input_rx, shutdown_tx, handle) = spawn_test_server().await;
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
             .await
             .unwrap();
@@ -239,7 +267,22 @@ mod tests {
         assert_eq!(input.pane_id, "7");
         assert_eq!(input.text, "hello");
 
-        handle.abort();
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_shuts_down_cleanly_on_signal() {
+        let (_addr, _tx, _input_rx, shutdown_tx, handle) = spawn_test_server().await;
+        shutdown_tx.send(()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     async fn http_get(addr: std::net::SocketAddr, path: &str) -> String {

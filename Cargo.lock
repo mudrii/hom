@@ -1238,8 +1238,10 @@ dependencies = [
 name = "hom-pty"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "dirs",
  "hom-core",
+ "libc",
  "portable-pty",
  "ssh2",
  "tokio",

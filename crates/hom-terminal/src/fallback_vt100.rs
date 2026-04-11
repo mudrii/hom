@@ -130,8 +130,26 @@ fn map_vt100_color(color: vt100::Color) -> TermColor {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use super::*;
     use hom_core::TerminalBackend;
+
+    fn read_once_with_timeout(
+        mut reader: Box<dyn std::io::Read + Send>,
+        timeout: Duration,
+    ) -> Vec<u8> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let n = reader.read(&mut buf).unwrap_or(0);
+            let _ = tx.send(buf[..n].to_vec());
+        });
+
+        rx.recv_timeout(timeout)
+            .expect("PTY read timed out before output arrived")
+    }
 
     #[test]
     fn test_process_and_snapshot() {
@@ -188,7 +206,6 @@ mod tests {
     fn test_pty_to_terminal_pipeline() {
         use hom_core::CommandSpec;
         use hom_pty::PtyManager;
-        use std::io::Read;
 
         let mut mgr = PtyManager::new();
         let spec = CommandSpec {
@@ -198,15 +215,11 @@ mod tests {
             working_dir: std::env::current_dir().unwrap_or_else(|_| ".".into()),
         };
         let id = mgr.spawn(&spec, 80, 24).unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(300));
-
-        let mut reader = mgr.take_reader(id).unwrap();
-        let mut buf = [0u8; 4096];
-        let n = reader.read(&mut buf).unwrap_or(0);
+        let reader = mgr.take_reader(id).unwrap();
+        let output = read_once_with_timeout(reader, Duration::from_secs(2));
 
         let mut term = Vt100Backend::new(80, 24, 100).unwrap();
-        term.process(&buf[..n]);
+        term.process(&output);
 
         let snap = term.screen_snapshot();
         let text = snap.text();

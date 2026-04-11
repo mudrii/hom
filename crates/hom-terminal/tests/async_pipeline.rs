@@ -94,8 +94,6 @@ async fn test_write_read_roundtrip_through_terminal() {
 
     let mut async_reader = AsyncPtyReader::start(id, raw_reader);
 
-    // Let `cat` start up before writing.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     mgr.write_to(id, b"ROUNDTRIP_CHECK\n").unwrap();
 
     let bytes = drain_channel(&mut async_reader.rx, 2000, 300).await;

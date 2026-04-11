@@ -5,7 +5,7 @@
 //! with AsyncPtyReader.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -26,7 +26,10 @@ pub enum SshAuthMethod {
 impl SshAuthMethod {
     /// Default auth sequence: SSH agent first, then common key files.
     pub fn defaults() -> Vec<Self> {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
         vec![
             Self::Agent,
             Self::KeyFile(home.join(".ssh/id_ed25519")),
@@ -46,6 +49,12 @@ pub struct RemoteSession {
     // Keep the session and TCP stream alive alongside the channel.
     _session: Session,
     _tcp: TcpStream,
+}
+
+/// A fully connected remote PTY ready to be inserted into the manager.
+pub struct ConnectedRemotePty {
+    pub session: RemoteSession,
+    pub reader: Box<dyn Read + Send>,
 }
 
 // SAFETY: `RemoteSession` is used from the single-threaded TUI event loop for writes
@@ -96,10 +105,49 @@ impl RemotePtyManager {
         rows: u16,
         auth_methods: &[SshAuthMethod],
     ) -> HomResult<(PaneId, Box<dyn std::io::Read + Send>)> {
+        let pane_id = self.reserve_pane_id();
+        let connected = Self::connect(
+            target.clone(),
+            command.to_string(),
+            env.clone(),
+            cols,
+            rows,
+            auth_methods.to_vec(),
+        )?;
+
+        info!(pane_id, %target, "spawned remote PTY");
+        self.insert_session(pane_id, connected.session);
+        Ok((pane_id, connected.reader))
+    }
+
+    /// Reserve a pane ID for a remote pane before the blocking SSH setup starts.
+    pub fn reserve_pane_id(&mut self) -> PaneId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Insert a connected session for a previously reserved pane ID.
+    pub fn insert_session(&mut self, pane_id: PaneId, session: RemoteSession) {
+        self.sessions.insert(pane_id, session);
+    }
+
+    /// Perform the blocking SSH setup required for a remote PTY.
+    ///
+    /// This is intended to run inside `tokio::task::spawn_blocking`.
+    pub fn connect(
+        target: RemoteTarget,
+        command: String,
+        env: HashMap<String, String>,
+        cols: u16,
+        rows: u16,
+        auth_methods: Vec<SshAuthMethod>,
+    ) -> HomResult<ConnectedRemotePty> {
         let tcp = TcpStream::connect(target.addr()).map_err(|e| {
             HomError::PtyError(format!("SSH connect to {} failed: {e}", target.addr()))
         })?;
-        tcp.set_read_timeout(Some(Duration::from_secs(30))).ok();
+        tcp.set_read_timeout(Some(Duration::from_secs(30)))
+            .map_err(|e| HomError::PtyError(format!("SSH read timeout setup failed: {e}")))?;
 
         let mut session = Session::new()
             .map_err(|e| HomError::PtyError(format!("SSH session create failed: {e}")))?;
@@ -111,7 +159,7 @@ impl RemotePtyManager {
             .handshake()
             .map_err(|e| HomError::PtyError(format!("SSH handshake failed: {e}")))?;
 
-        if !Self::try_authenticate(&mut session, &target.user, auth_methods) {
+        if !Self::try_authenticate(&mut session, &target.user, &auth_methods) {
             return Err(HomError::PtyError(format!(
                 "SSH authentication failed for {}@{}",
                 target.user, target.host
@@ -130,39 +178,24 @@ impl RemotePtyManager {
             )
             .map_err(|e| HomError::PtyError(format!("SSH request_pty failed: {e}")))?;
 
-        for (key, value) in env {
+        for (key, value) in &env {
             channel
                 .setenv(key, value)
                 .map_err(|e| HomError::PtyError(format!("SSH setenv {key} failed: {e}")))?;
         }
 
-        // ssh2::Channel::exec() sends the command over the SSH protocol channel.
-        // The command string comes from RemoteTarget::build_remote_command() which
-        // shell-quotes every argument individually; no shell injection is possible.
         channel
-            .exec(command)
+            .exec(&command)
             .map_err(|e| HomError::PtyError(format!("SSH channel exec failed: {e}")))?;
 
-        // Both reader and stored channel share the same Arc-backed ssh2::Channel.
-        // The reader is consumed by AsyncPtyReader for output; the stored handle
-        // is used by write_to(), resize(), and kill() for input and control.
-        let reader: Box<dyn std::io::Read + Send> = Box::new(channel.clone());
-
-        let id = self.next_id;
-        self.next_id += 1;
-
-        info!(pane_id = id, %target, "spawned remote PTY");
-
-        self.sessions.insert(
-            id,
-            RemoteSession {
+        Ok(ConnectedRemotePty {
+            reader: Box::new(channel.clone()),
+            session: RemoteSession {
                 channel,
                 _session: session,
                 _tcp: tcp,
             },
-        );
-
-        Ok((id, reader))
+        })
     }
 
     fn try_authenticate(session: &mut Session, user: &str, methods: &[SshAuthMethod]) -> bool {

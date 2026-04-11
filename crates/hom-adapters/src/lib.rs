@@ -32,6 +32,15 @@ use hom_core::{HarnessAdapter, HarnessType, HomError};
 use hom_plugin::PluginLoader;
 use tracing::warn;
 
+pub(crate) fn screen_has_error_line(text: &str) -> bool {
+    text.lines().map(str::trim_start).any(|line| {
+        matches!(line, "Error" | "ERROR" | "error")
+            || line.starts_with("Error:")
+            || line.starts_with("ERROR:")
+            || line.starts_with("error:")
+    })
+}
+
 /// Registry of all available harness adapters.
 pub struct AdapterRegistry {
     adapters: HashMap<HarnessType, Box<dyn HarnessAdapter>>,
@@ -213,5 +222,14 @@ mod tests {
     fn registry_plugin_names_empty_initially() {
         let registry = AdapterRegistry::new();
         assert!(registry.plugin_names().is_empty());
+    }
+
+    #[test]
+    fn screen_error_detection_requires_error_prefixes() {
+        assert!(screen_has_error_line("Error: boom"));
+        assert!(screen_has_error_line("  error: boom"));
+        assert!(screen_has_error_line("ERROR: boom"));
+        assert!(!screen_has_error_line("No errors found"));
+        assert!(!screen_has_error_line("ErrorHandler class loaded"));
     }
 }

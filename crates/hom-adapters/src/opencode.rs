@@ -8,6 +8,8 @@
 
 use hom_core::*;
 
+use crate::screen_has_error_line;
+
 pub struct OpenCodeAdapter {
     pub sideband_url: String,
 }
@@ -97,7 +99,7 @@ impl HarnessAdapter for OpenCodeAdapter {
 
         if last_line.starts_with('❯') || last_line.starts_with("> ") || last_line == ">" {
             CompletionStatus::WaitingForInput
-        } else if last_lines.contains("Error") || last_lines.contains("error:") {
+        } else if screen_has_error_line(&last_lines) {
             CompletionStatus::Failed { error: last_lines }
         } else {
             CompletionStatus::Running
@@ -183,6 +185,26 @@ mod tests {
         assert!(matches!(
             adapter.detect_completion(&screen),
             CompletionStatus::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_parse_screen_extracts_created_and_updated_files() {
+        let adapter = OpenCodeAdapter::new();
+        let screen = make_screen(&["Created src/main.rs", "Updated src/lib.rs"]);
+        let events = adapter.parse_screen(&screen);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            HarnessEvent::FileChanged { path, change_type }
+                if path == &std::path::PathBuf::from("src/main.rs")
+                    && *change_type == ChangeType::Created
+        ));
+        assert!(matches!(
+            &events[1],
+            HarnessEvent::FileChanged { path, change_type }
+                if path == &std::path::PathBuf::from("src/lib.rs")
+                    && *change_type == ChangeType::Modified
         ));
     }
 

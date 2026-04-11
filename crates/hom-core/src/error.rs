@@ -83,3 +83,29 @@ pub enum HomError {
 }
 
 pub type HomResult<T> = Result<T, HomError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_renders_harness_spawn_failed_context() {
+        let err = HomError::HarnessSpawnFailed {
+            harness: HarnessType::CodexCli,
+            reason: "binary missing".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "harness spawn failed for CodexCli: binary missing"
+        );
+    }
+
+    #[test]
+    fn display_renders_workflow_step_failed_context() {
+        let err = HomError::WorkflowStepFailed {
+            step: "plan".to_string(),
+            reason: "timeout".to_string(),
+        };
+        assert_eq!(err.to_string(), "workflow step plan failed: timeout");
+    }
+}

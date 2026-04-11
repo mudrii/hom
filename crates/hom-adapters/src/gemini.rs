@@ -7,6 +7,8 @@
 
 use hom_core::*;
 
+use crate::screen_has_error_line;
+
 pub struct GeminiAdapter;
 
 impl GeminiAdapter {
@@ -91,7 +93,7 @@ impl HarnessAdapter for GeminiAdapter {
 
         if last_line.starts_with('❯') || last_line.starts_with("> ") || last_line == ">" {
             CompletionStatus::WaitingForInput
-        } else if last_lines.contains("ERROR") || last_lines.contains("error:") {
+        } else if screen_has_error_line(&last_lines) {
             CompletionStatus::Failed { error: last_lines }
         } else {
             CompletionStatus::Running
@@ -171,6 +173,35 @@ mod tests {
         assert!(matches!(
             adapter.detect_completion(&screen),
             CompletionStatus::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_parse_screen_extracts_file_and_command_events() {
+        let adapter = GeminiAdapter::new();
+        let screen = make_screen(&[
+            "Created file: src/main.rs",
+            "Updated file: src/lib.rs",
+            "$ cargo test",
+        ]);
+        let events = adapter.parse_screen(&screen);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[0],
+            HarnessEvent::FileChanged { path, change_type }
+                if path == &std::path::PathBuf::from("src/main.rs")
+                    && *change_type == ChangeType::Created
+        ));
+        assert!(matches!(
+            &events[1],
+            HarnessEvent::FileChanged { path, change_type }
+                if path == &std::path::PathBuf::from("src/lib.rs")
+                    && *change_type == ChangeType::Modified
+        ));
+        assert!(matches!(
+            &events[2],
+            HarnessEvent::CommandExecuted { command, exit_code }
+                if command == "cargo test" && exit_code.is_none()
         ));
     }
 

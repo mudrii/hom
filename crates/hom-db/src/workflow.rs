@@ -110,16 +110,16 @@ mod tests {
     use super::*;
     use crate::HomDb;
 
-    async fn open_temp_db() -> HomDb {
+    async fn open_temp_db() -> (tempfile::TempDir, HomDb) {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("hom.sqlite");
-        std::mem::forget(temp);
-        HomDb::open(db_path.to_str().unwrap()).await.unwrap()
+        let db = HomDb::open(db_path.to_str().unwrap()).await.unwrap();
+        (temp, db)
     }
 
     #[tokio::test]
     async fn save_workflow_and_update_status_persist_lifecycle() {
-        let db = open_temp_db().await;
+        let (_temp, db) = open_temp_db().await;
 
         save_workflow(
             db.pool(),
@@ -152,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_step_persists_all_fields() {
-        let db = open_temp_db().await;
+        let (_temp, db) = open_temp_db().await;
         save_workflow(
             db.pool(),
             "wf-2",

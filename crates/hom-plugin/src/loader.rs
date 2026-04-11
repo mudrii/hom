@@ -9,6 +9,59 @@ use tracing::{debug, info, warn};
 use crate::adapter::PluginAdapter;
 use crate::ffi::{HOM_PLUGIN_ABI_VERSION, HomPluginVtable};
 
+#[repr(C)]
+struct RawHomPluginVtable {
+    abi_version: usize,
+    display_name: usize,
+    binary_name: usize,
+    build_command: usize,
+    translate_input: usize,
+    parse_screen: usize,
+    detect_completion: usize,
+    free_str: usize,
+    capabilities: usize,
+}
+
+fn validate_vtable_ptr(vtable_ptr: *mut HomPluginVtable) -> Result<(), HomError> {
+    if vtable_ptr.is_null() {
+        return Err(HomError::PluginError(
+            "hom_plugin_init returned null".to_string(),
+        ));
+    }
+
+    // SAFETY: `vtable_ptr` was returned by the plugin init function and points to
+    // a vtable allocation with `repr(C)` layout. We inspect the raw fields only to
+    // validate ABI version and non-null function-pointer slots before constructing
+    // the typed adapter wrapper.
+    let raw = unsafe { &*(vtable_ptr.cast::<RawHomPluginVtable>()) };
+
+    if raw.abi_version != HOM_PLUGIN_ABI_VERSION {
+        return Err(HomError::PluginError(format!(
+            "plugin ABI version {} != expected {}",
+            raw.abi_version, HOM_PLUGIN_ABI_VERSION
+        )));
+    }
+
+    let required = [
+        ("display_name", raw.display_name),
+        ("binary_name", raw.binary_name),
+        ("build_command", raw.build_command),
+        ("translate_input", raw.translate_input),
+        ("parse_screen", raw.parse_screen),
+        ("detect_completion", raw.detect_completion),
+        ("free_str", raw.free_str),
+        ("capabilities", raw.capabilities),
+    ];
+
+    if let Some((field, _)) = required.iter().find(|(_, ptr)| *ptr == 0) {
+        return Err(HomError::PluginError(format!(
+            "plugin vtable field '{field}' is null"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Loads HOM adapter plugins from `.dylib` / `.so` files.
 pub struct PluginLoader;
 
@@ -41,22 +94,7 @@ impl PluginLoader {
             init_fn()
         };
 
-        if vtable_ptr.is_null() {
-            return Err(HomError::PluginError(
-                "hom_plugin_init returned null".to_string(),
-            ));
-        }
-
-        // SAFETY: vtable_ptr is non-null and points to a valid HomPluginVtable
-        // returned by the plugin's init function.
-        let vtable = unsafe { &*vtable_ptr };
-
-        if vtable.abi_version != HOM_PLUGIN_ABI_VERSION {
-            return Err(HomError::PluginError(format!(
-                "plugin ABI version {} != expected {}",
-                vtable.abi_version, HOM_PLUGIN_ABI_VERSION
-            )));
-        }
+        validate_vtable_ptr(vtable_ptr)?;
 
         // SAFETY: hom_plugin_destroy is an optional C function with signature
         // `fn(*mut HomPluginVtable)`. If absent, the plugin has no cleanup to do.
@@ -117,7 +155,38 @@ impl PluginLoader {
 
 #[cfg(test)]
 mod tests {
+    use std::os::raw::c_char;
+
     use super::*;
+
+    extern "C" fn static_name() -> *const c_char {
+        c"demo".as_ptr()
+    }
+
+    extern "C" fn build_command_stub(_: *const c_char) -> *mut c_char {
+        std::ptr::null_mut()
+    }
+
+    extern "C" fn translate_input_stub(
+        _: crate::ffi::HomInputKind,
+        _: *const c_char,
+    ) -> *mut c_char {
+        std::ptr::null_mut()
+    }
+
+    extern "C" fn parse_screen_stub(_: *const c_char) -> *mut c_char {
+        std::ptr::null_mut()
+    }
+
+    extern "C" fn detect_completion_stub(_: *const c_char) -> *mut c_char {
+        std::ptr::null_mut()
+    }
+
+    extern "C" fn free_str_stub(_: *mut c_char) {}
+
+    extern "C" fn capabilities_stub() -> *mut c_char {
+        std::ptr::null_mut()
+    }
 
     #[test]
     fn load_nonexistent_path_returns_error() {
@@ -150,5 +219,26 @@ mod tests {
         std::fs::write(dir.path().join("plugin.rs"), "ignored").unwrap();
         let adapters = PluginLoader::scan_dir(dir.path());
         assert!(adapters.is_empty());
+    }
+
+    #[test]
+    fn validate_vtable_rejects_null_function_pointer() {
+        let vtable = RawHomPluginVtable {
+            abi_version: HOM_PLUGIN_ABI_VERSION,
+            display_name: 0,
+            binary_name: static_name as *const () as usize,
+            build_command: build_command_stub as *const () as usize,
+            translate_input: translate_input_stub as *const () as usize,
+            parse_screen: parse_screen_stub as *const () as usize,
+            detect_completion: detect_completion_stub as *const () as usize,
+            free_str: free_str_stub as *const () as usize,
+            capabilities: capabilities_stub as *const () as usize,
+        };
+
+        let err = validate_vtable_ptr((&vtable as *const RawHomPluginVtable).cast_mut().cast())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("display_name"));
+        assert!(err.contains("null"));
     }
 }

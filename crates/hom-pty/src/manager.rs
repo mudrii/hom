@@ -1,6 +1,6 @@
 //! PTY lifecycle management: spawn, read, write, resize, kill.
 
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, PtySystem, native_pty_system};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use tracing::{debug, info};
@@ -33,7 +33,16 @@ impl PtyManager {
     /// Returns the pane ID assigned to this PTY.
     pub fn spawn(&mut self, spec: &CommandSpec, cols: u16, rows: u16) -> HomResult<PaneId> {
         let pty_system = native_pty_system();
+        self.spawn_with_system(pty_system.as_ref(), spec, cols, rows)
+    }
 
+    fn spawn_with_system(
+        &mut self,
+        pty_system: &dyn PtySystem,
+        spec: &CommandSpec,
+        cols: u16,
+        rows: u16,
+    ) -> HomResult<PaneId> {
         let pair = pty_system
             .openpty(PtySize {
                 rows,
@@ -55,15 +64,21 @@ impl PtyManager {
             .spawn_command(cmd)
             .map_err(|e| HomError::PtyError(format!("spawn failed: {e}")))?;
 
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| HomError::PtyError(format!("take_writer: {e}")))?;
+        let writer = match pair.master.take_writer() {
+            Ok(writer) => writer,
+            Err(e) => {
+                cleanup_failed_child(child);
+                return Err(HomError::PtyError(format!("take_writer: {e}")));
+            }
+        };
 
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| HomError::PtyError(format!("clone_reader: {e}")))?;
+        let reader = match pair.master.try_clone_reader() {
+            Ok(reader) => reader,
+            Err(e) => {
+                cleanup_failed_child(child);
+                return Err(HomError::PtyError(format!("clone_reader: {e}")));
+            }
+        };
 
         let id = self.next_id;
         self.next_id += 1;
@@ -190,6 +205,12 @@ impl PtyManager {
     }
 }
 
+fn cleanup_failed_child(mut child: Box<dyn Child + Send + Sync>) {
+    if let Err(e) = child.kill() {
+        debug!(error = %e, "failed to kill child after PTY setup error");
+    }
+}
+
 impl Default for PtyManager {
     fn default() -> Self {
         Self::new()
@@ -198,7 +219,34 @@ impl Default for PtyManager {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    #[cfg(unix)]
+    use libc::pid_t;
+    use std::io::Read as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use portable_pty::{ChildKiller, ExitStatus, PtyPair, SlavePty};
+
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use super::*;
+
+    fn read_once_with_timeout(
+        mut reader: Box<dyn std::io::Read + Send>,
+        timeout: Duration,
+    ) -> Vec<u8> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            let n = reader.read(&mut buf).unwrap_or(0);
+            let _ = tx.send(buf[..n].to_vec());
+        });
+
+        rx.recv_timeout(timeout)
+            .expect("PTY read timed out before output arrived")
+    }
 
     #[test]
     fn test_kill_all_empties_instances() {
@@ -228,8 +276,6 @@ mod tests {
 
     #[test]
     fn test_spawn_and_read_output() {
-        use std::io::Read as _;
-
         let mut mgr = PtyManager::new();
         let spec = CommandSpec {
             program: "sh".to_string(),
@@ -238,13 +284,9 @@ mod tests {
             working_dir: std::env::current_dir().unwrap_or_else(|_| ".".into()),
         };
         let id = mgr.spawn(&spec, 80, 24).unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        let mut reader = mgr.take_reader(id).unwrap();
-        let mut buf = [0u8; 1024];
-        let n = reader.read(&mut buf).unwrap_or(0);
-        let output = String::from_utf8_lossy(&buf[..n]);
+        let reader = mgr.take_reader(id).unwrap();
+        let output = read_once_with_timeout(reader, Duration::from_secs(2));
+        let output = String::from_utf8_lossy(&output);
 
         assert!(
             output.contains("hello_from_pty"),
@@ -256,8 +298,6 @@ mod tests {
 
     #[test]
     fn test_spawn_and_write_input() {
-        use std::io::Read as _;
-
         let mut mgr = PtyManager::new();
         let spec = CommandSpec {
             program: "cat".to_string(),
@@ -268,13 +308,9 @@ mod tests {
         let id = mgr.spawn(&spec, 80, 24).unwrap();
 
         mgr.write_to(id, b"test_input\n").unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        let mut reader = mgr.take_reader(id).unwrap();
-        let mut buf = [0u8; 1024];
-        let n = reader.read(&mut buf).unwrap_or(0);
-        let output = String::from_utf8_lossy(&buf[..n]);
+        let reader = mgr.take_reader(id).unwrap();
+        let output = read_once_with_timeout(reader, Duration::from_secs(2));
+        let output = String::from_utf8_lossy(&output);
 
         assert!(
             output.contains("test_input"),
@@ -282,5 +318,135 @@ mod tests {
         );
 
         mgr.kill_all();
+    }
+
+    #[derive(Debug)]
+    struct FakeChild {
+        killed: Arc<AtomicUsize>,
+    }
+
+    impl ChildKiller for FakeChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Self {
+                killed: self.killed.clone(),
+            })
+        }
+    }
+
+    impl portable_pty::Child for FakeChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(42)
+        }
+    }
+
+    struct FakeMaster {
+        fail_writer: bool,
+    }
+
+    impl portable_pty::MasterPty for FakeMaster {
+        fn resize(&self, _size: portable_pty::PtySize) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_size(&self) -> Result<portable_pty::PtySize> {
+            Ok(portable_pty::PtySize::default())
+        }
+
+        fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>> {
+            Ok(Box::new(std::io::Cursor::new(Vec::<u8>::new())))
+        }
+
+        fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>> {
+            if self.fail_writer {
+                Err(std::io::Error::other("boom").into())
+            } else {
+                Ok(Box::new(std::io::sink()))
+            }
+        }
+
+        #[cfg(unix)]
+        fn process_group_leader(&self) -> Option<pid_t> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn tty_name(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    struct FakeSlave {
+        killed: Arc<AtomicUsize>,
+    }
+
+    impl SlavePty for FakeSlave {
+        fn spawn_command(
+            &self,
+            _cmd: portable_pty::CommandBuilder,
+        ) -> Result<Box<dyn portable_pty::Child + Send + Sync>> {
+            Ok(Box::new(FakeChild {
+                killed: self.killed.clone(),
+            }))
+        }
+    }
+
+    struct FakePtySystem {
+        killed: Arc<AtomicUsize>,
+        fail_writer: bool,
+    }
+
+    impl portable_pty::PtySystem for FakePtySystem {
+        fn openpty(&self, _size: portable_pty::PtySize) -> Result<PtyPair> {
+            Ok(PtyPair {
+                slave: Box::new(FakeSlave {
+                    killed: self.killed.clone(),
+                }),
+                master: Box::new(FakeMaster {
+                    fail_writer: self.fail_writer,
+                }),
+            })
+        }
+    }
+
+    #[test]
+    fn spawn_kills_child_if_take_writer_fails() {
+        let killed = Arc::new(AtomicUsize::new(0));
+        let pty_system = FakePtySystem {
+            killed: killed.clone(),
+            fail_writer: true,
+        };
+        let spec = CommandSpec {
+            program: "fake".to_string(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        };
+        let mut mgr = PtyManager::new();
+
+        let err = mgr
+            .spawn_with_system(&pty_system, &spec, 80, 24)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("take_writer"));
+        assert_eq!(killed.load(Ordering::SeqCst), 1);
+        assert!(mgr.active_panes().is_empty());
     }
 }

@@ -223,6 +223,42 @@ pub struct RemoteTarget {
     pub port: u16,
 }
 
+#[cfg(test)]
+mod harness_type_tests {
+    use super::*;
+
+    #[test]
+    fn harness_type_from_str_loose_accepts_common_aliases() {
+        assert_eq!(
+            HarnessType::from_str_loose("claude"),
+            Some(HarnessType::ClaudeCode)
+        );
+        assert_eq!(
+            HarnessType::from_str_loose("codex-cli"),
+            Some(HarnessType::CodexCli)
+        );
+        assert_eq!(
+            HarnessType::from_str_loose("gh-copilot"),
+            Some(HarnessType::CopilotCli)
+        );
+        assert_eq!(HarnessType::from_str_loose("unknown"), None);
+    }
+
+    #[test]
+    fn harness_type_config_keys_match_expected_entries() {
+        assert_eq!(HarnessType::ClaudeCode.config_key(), "claude-code");
+        assert_eq!(HarnessType::PiMono.config_key(), "pi-mono");
+        assert_eq!(HarnessType::OpenCode.config_key(), "opencode");
+    }
+
+    #[test]
+    fn harness_type_default_binaries_match_spawned_tools() {
+        assert_eq!(HarnessType::ClaudeCode.default_binary(), "claude");
+        assert_eq!(HarnessType::KimiCli.default_binary(), "kimi");
+        assert_eq!(HarnessType::CopilotCli.default_binary(), "copilot");
+    }
+}
+
 impl RemoteTarget {
     /// Parse `user@host` or `user@host:port`. Returns `None` if:
     /// - The string contains no `@` (not a remote target spec)

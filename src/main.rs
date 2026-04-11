@@ -16,12 +16,14 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use hom_core::{HarnessType, HomConfig, LayoutKind, TerminalBackend};
 use hom_mcp::McpServer;
-use hom_tui::app::{App, PaneSpawnRequest, RemotePaneSpawnRequest};
+use hom_pty::{ConnectedRemotePty, RemotePtyManager};
+use hom_tui::app::{App, PaneSpawnRequest, PreparedRemotePaneSpawn, RemotePaneSpawnRequest};
 use hom_tui::input::Action;
 use hom_tui::render::render;
 use hom_tui::workflow_bridge::{
@@ -36,6 +38,49 @@ struct RunAppContext {
     workflow_launch_rx: WorkflowLaunchRx,
     bridge: Arc<WorkflowBridge>,
     workflow_launcher: WorkflowLauncher,
+    remote_spawn_tx: mpsc::UnboundedSender<RemoteSpawnCompletion>,
+    remote_spawn_rx: mpsc::UnboundedReceiver<RemoteSpawnCompletion>,
+    remote_spawn_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+struct RemoteSpawnCompletion {
+    prepared: PreparedRemotePaneSpawn,
+    result: hom_core::HomResult<ConnectedRemotePty>,
+}
+
+struct BackgroundTask {
+    name: &'static str,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl BackgroundTask {
+    async fn shutdown(mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+
+        match tokio::time::timeout(Duration::from_secs(2), &mut self.handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                warn!(task = self.name, error = %err, "background task exited with error");
+            }
+            Err(_) => {
+                warn!(
+                    task = self.name,
+                    "background task did not exit after shutdown signal; aborting"
+                );
+                self.handle.abort();
+                let _ = self.handle.await;
+            }
+        }
+    }
+}
+
+async fn shutdown_background_tasks(tasks: Vec<BackgroundTask>) {
+    for task in tasks {
+        task.shutdown().await;
+    }
 }
 
 #[derive(Parser)]
@@ -83,9 +128,57 @@ fn parse_var(s: &str) -> Result<(String, String), String> {
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
+fn clamp_terminal_dims(cols: u16, rows: u16) -> (u16, u16) {
+    (cols.max(1), rows.max(1))
+}
+
+fn pane_inner_dims(area: ratatui::layout::Rect) -> (u16, u16) {
+    clamp_terminal_dims(area.width.saturating_sub(2), area.height.saturating_sub(2))
+}
+
+fn queue_remote_spawn(
+    app: &mut App,
+    request: RemotePaneSpawnRequest,
+    remote_spawn_tx: &mpsc::UnboundedSender<RemoteSpawnCompletion>,
+    remote_spawn_tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> hom_core::HomResult<()> {
+    let prepared = app.prepare_remote_pane_spawn(request)?;
+    let tx = remote_spawn_tx.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        let result = RemotePtyManager::connect(
+            prepared.target.clone(),
+            prepared.command.clone(),
+            prepared.env.clone(),
+            prepared.cols,
+            prepared.rows,
+            prepared.auth_methods.clone(),
+        );
+        let _ = tx.send(RemoteSpawnCompletion { prepared, result });
+    });
+    remote_spawn_tasks.push(handle);
+    Ok(())
+}
+
+async fn shutdown_remote_spawn_tasks(tasks: Vec<tokio::task::JoinHandle<()>>) {
+    for mut task in tasks {
+        match tokio::time::timeout(Duration::from_secs(1), &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                warn!(error = %err, "remote spawn task exited with error");
+            }
+            Err(_) => {
+                warn!("remote spawn task still running during shutdown");
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let mut background_tasks = Vec::new();
 
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -125,8 +218,18 @@ async fn main() -> anyhow::Result<()> {
     if cli.mcp {
         let (mcp_tx, mcp_rx) = tokio::sync::mpsc::channel(64);
         app.mcp_rx = Some(mcp_rx);
-        tokio::spawn(async move {
-            McpServer::new(mcp_tx).run().await;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            McpServer::new(mcp_tx)
+                .run_until_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        background_tasks.push(BackgroundTask {
+            name: "mcp-server",
+            shutdown_tx: Some(shutdown_tx),
+            handle,
         });
         tracing::info!("MCP server started (JSON-RPC 2.0 on stdin/stdout)");
     }
@@ -139,13 +242,21 @@ async fn main() -> anyhow::Result<()> {
         let (web_input_tx, web_input_rx) = tokio::sync::mpsc::channel(64);
         app.web_tx = Some(web_tx.clone());
         app.web_input_rx = Some(web_input_rx);
-        let _web_handle = tokio::spawn(async move {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
             if let Err(e) = hom_web::WebServer::new(cli.web_port, web_tx, web_input_tx)
-                .run()
+                .run_until_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
                 .await
             {
                 tracing::error!("Web server failed: {e}");
             }
+        });
+        background_tasks.push(BackgroundTask {
+            name: "web-server",
+            shutdown_tx: Some(shutdown_tx),
+            handle,
         });
         tracing::info!("Web view at http://localhost:{}", cli.web_port);
     }
@@ -167,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
         app.command_bar.last_error = Some("running without database (--no-db)".to_string());
     } else {
         let db_path = app.config.db_path();
-        let db = match hom_db::HomDb::open(db_path.to_str().unwrap_or("hom.db")).await {
+        let db = match hom_db::HomDb::open_path(&db_path).await {
             Ok(db) => db,
             Err(e) => {
                 disable_raw_mode()?;
@@ -198,6 +309,7 @@ async fn main() -> anyhow::Result<()> {
     let bridge = Arc::new(bridge);
     let (workflow_launcher, workflow_launch_rx) = WorkflowLauncher::new();
     app.workflow_launcher = Some(workflow_launcher.clone());
+    let (remote_spawn_tx, remote_spawn_rx) = mpsc::unbounded_channel();
 
     // Wire CLI --run/--var: if a workflow was specified, launch it
     if let Some(workflow_name) = &cli.run {
@@ -232,19 +344,22 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let result = run_app(
-        &mut terminal,
-        &mut app,
-        RunAppContext {
-            allow_terminal_input: !cli.mcp,
-            tick_rate,
-            workflow_rx,
-            workflow_launch_rx,
-            bridge,
-            workflow_launcher,
-        },
-    )
-    .await;
+    let mut ctx = RunAppContext {
+        allow_terminal_input: !cli.mcp,
+        tick_rate,
+        workflow_rx,
+        workflow_launch_rx,
+        bridge,
+        workflow_launcher,
+        remote_spawn_tx,
+        remote_spawn_rx,
+        remote_spawn_tasks: Vec::new(),
+    };
+    let result = run_app(&mut terminal, &mut app, &mut ctx).await;
+
+    shutdown_remote_spawn_tasks(std::mem::take(&mut ctx.remote_spawn_tasks)).await;
+
+    shutdown_background_tasks(background_tasks).await;
 
     // Clean up all PTY processes before restoring the terminal
     app.shutdown();
@@ -269,7 +384,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_app<W: io::Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     app: &mut App,
-    mut ctx: RunAppContext,
+    ctx: &mut RunAppContext,
 ) -> anyhow::Result<()> {
     // Cost polling: query total_cost from DB roughly every second.
     let (cost_tx, mut cost_rx) = tokio::sync::mpsc::unbounded_channel::<f64>();
@@ -283,6 +398,26 @@ async fn run_app<W: io::Write>(
     let (health_tx, mut health_rx) = tokio::sync::mpsc::unbounded_channel::<(u32, String, bool)>();
 
     loop {
+        while let Ok(completion) = ctx.remote_spawn_rx.try_recv() {
+            match completion.result {
+                Ok(connected) => {
+                    match app.complete_remote_pane_spawn(completion.prepared, connected) {
+                        Ok(pane_id) => info!(pane_id, "remote pane spawned"),
+                        Err(e) => {
+                            app.command_bar.last_error = Some(format!("remote spawn failed: {e}"));
+                            warn!(error = %e, "failed to finalize remote pane spawn");
+                        }
+                    }
+                }
+                Err(e) => {
+                    app.remote_spawn_failed();
+                    app.command_bar.last_error = Some(format!("remote spawn failed: {e}"));
+                    warn!(error = %e, "remote pane connect failed");
+                }
+            }
+        }
+        ctx.remote_spawn_tasks.retain(|task| !task.is_finished());
+
         // Forward any browser keystrokes to the focused pane before rendering.
         app.handle_web_input();
 
@@ -348,12 +483,15 @@ async fn run_app<W: io::Write>(
                 let new_areas =
                     hom_tui::layout::compute_pane_areas(pane_area, &app.pane_order, &app.layout);
                 for (pane_id, area) in &new_areas {
-                    let inner_w = area.width.saturating_sub(2);
-                    let inner_h = area.height.saturating_sub(2);
+                    let (inner_w, inner_h) = pane_inner_dims(*area);
                     if app.remote_ptys.has_pane(*pane_id) {
-                        let _ = app.remote_ptys.resize(*pane_id, inner_w, inner_h);
+                        if let Err(e) = app.remote_ptys.resize(*pane_id, inner_w, inner_h) {
+                            warn!(pane_id, error = %e, "failed to resize remote PTY");
+                        }
                     } else {
-                        let _ = app.pty_manager.resize(*pane_id, inner_w, inner_h);
+                        if let Err(e) = app.pty_manager.resize(*pane_id, inner_w, inner_h) {
+                            warn!(pane_id, error = %e, "failed to resize PTY");
+                        }
                     }
                     if let Some(pane) = app.panes.get_mut(pane_id) {
                         pane.terminal.resize(inner_w, inner_h);
@@ -376,13 +514,24 @@ async fn run_app<W: io::Write>(
                 }
                 Action::CommandBarInput(key) => {
                     if let Some(cmd) = app.command_bar.handle_key(key) {
-                        handle_command(app, cmd, size, &ctx.workflow_launcher)?;
+                        let remote_spawn_tx = ctx.remote_spawn_tx.clone();
+                        handle_command(
+                            app,
+                            cmd,
+                            size,
+                            &ctx.workflow_launcher,
+                            &remote_spawn_tx,
+                            &mut ctx.remote_spawn_tasks,
+                        )?;
                     }
                 }
                 Action::NextPane => app.focus_next(),
                 Action::PrevPane => app.focus_prev(),
                 Action::KillPane(pane_id) => {
-                    let _ = app.kill_pane(pane_id);
+                    if let Err(e) = app.kill_pane(pane_id) {
+                        warn!(pane_id, error = %e, "failed to kill pane");
+                        app.command_bar.last_error = Some(format!("kill pane failed: {e}"));
+                    }
                 }
                 Action::None => {}
             }
@@ -510,6 +659,8 @@ fn handle_command(
     cmd: hom_tui::command_bar::Command,
     terminal_size: ratatui::layout::Rect,
     workflow_launcher: &WorkflowLauncher,
+    remote_spawn_tx: &mpsc::UnboundedSender<RemoteSpawnCompletion>,
+    remote_spawn_tasks: &mut Vec<tokio::task::JoinHandle<()>>,
 ) -> anyhow::Result<()> {
     use hom_tui::command_bar::Command;
 
@@ -527,16 +678,21 @@ fn handle_command(
                 match harness {
                     Some(ht) => {
                         let (cols, rows) = app.focused_pane_dimensions();
-                        match app.spawn_remote_pane_with_opts(RemotePaneSpawnRequest {
-                            harness_type: ht,
-                            model,
-                            working_dir,
-                            extra_args,
-                            target,
-                            cols,
-                            rows,
-                        }) {
-                            Ok(id) => info!(pane_id = id, "remote pane spawned"),
+                        match queue_remote_spawn(
+                            app,
+                            RemotePaneSpawnRequest {
+                                harness_type: ht,
+                                model,
+                                working_dir,
+                                extra_args,
+                                target,
+                                cols,
+                                rows,
+                            },
+                            remote_spawn_tx,
+                            remote_spawn_tasks,
+                        ) {
+                            Ok(()) => info!("queued remote pane spawn"),
                             Err(e) => {
                                 app.command_bar.last_error =
                                     Some(format!("remote spawn failed: {e}"));
@@ -550,8 +706,10 @@ fn handle_command(
                     }
                 }
             } else {
-                let cols = terminal_size.width.saturating_sub(2);
-                let rows = terminal_size.height.saturating_sub(6);
+                let (cols, rows) = clamp_terminal_dims(
+                    terminal_size.width.saturating_sub(2),
+                    terminal_size.height.saturating_sub(6),
+                );
                 match app.spawn_pane_with_opts(PaneSpawnRequest {
                     harness,
                     harness_name,
@@ -572,8 +730,11 @@ fn handle_command(
             app.handle_load_plugin(&path);
         }
         Command::Kill(selector) => {
-            if let Some(id) = resolve_selector(&selector, app) {
-                let _ = app.kill_pane(id);
+            if let Some(id) = resolve_selector(&selector, app)
+                && let Err(e) = app.kill_pane(id)
+            {
+                app.command_bar.last_error = Some(format!("kill pane failed: {e}"));
+                warn!(pane_id = id, error = %e, "failed to kill pane");
             }
         }
         Command::Focus(selector) => {
@@ -594,12 +755,15 @@ fn handle_command(
             let new_areas =
                 hom_tui::layout::compute_pane_areas(pane_area, &app.pane_order, &app.layout);
             for (pane_id, area) in &new_areas {
-                let inner_w = area.width.saturating_sub(2);
-                let inner_h = area.height.saturating_sub(2);
+                let (inner_w, inner_h) = pane_inner_dims(*area);
                 if app.remote_ptys.has_pane(*pane_id) {
-                    let _ = app.remote_ptys.resize(*pane_id, inner_w, inner_h);
+                    if let Err(e) = app.remote_ptys.resize(*pane_id, inner_w, inner_h) {
+                        warn!(pane_id, error = %e, "failed to resize remote PTY");
+                    }
                 } else {
-                    let _ = app.pty_manager.resize(*pane_id, inner_w, inner_h);
+                    if let Err(e) = app.pty_manager.resize(*pane_id, inner_w, inner_h) {
+                        warn!(pane_id, error = %e, "failed to resize PTY");
+                    }
                 }
                 if let Some(pane) = app.panes.get_mut(pane_id) {
                     pane.terminal.resize(inner_w, inner_h);
@@ -647,7 +811,13 @@ fn handle_command(
             variables,
         } => handle_run(app, workflow, variables, workflow_launcher)?,
         Command::Save(name) => handle_save(app, name),
-        Command::Restore(name) => handle_restore(app, name, terminal_size),
+        Command::Restore(name) => handle_restore(
+            app,
+            name,
+            terminal_size,
+            remote_spawn_tx,
+            remote_spawn_tasks,
+        ),
     }
 
     Ok(())
@@ -758,7 +928,14 @@ fn handle_run(
 
 fn handle_save(app: &mut App, name: String) {
     if let Some(ref db) = app.db {
-        let (layout_json, panes_json) = app.session_snapshot();
+        let (layout_json, panes_json) = match app.session_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                app.command_bar.last_error = Some(format!("session snapshot failed: {e}"));
+                warn!(error = %e, "session snapshot failed");
+                return;
+            }
+        };
         let session_id = uuid::Uuid::new_v4().to_string();
         let db = db.clone();
         let name_clone = name.clone();
@@ -782,7 +959,13 @@ fn handle_save(app: &mut App, name: String) {
     }
 }
 
-fn handle_restore(app: &mut App, name: String, terminal_size: ratatui::layout::Rect) {
+fn handle_restore(
+    app: &mut App,
+    name: String,
+    terminal_size: ratatui::layout::Rect,
+    remote_spawn_tx: &mpsc::UnboundedSender<RemoteSpawnCompletion>,
+    remote_spawn_tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
     if let Some(ref db) = app.db {
         let db = db.clone();
         let name_clone = name.clone();
@@ -802,8 +985,10 @@ fn handle_restore(app: &mut App, name: String, terminal_size: ratatui::layout::R
                 if let Ok(pane_configs) =
                     serde_json::from_str::<Vec<hom_tui::app::SessionPaneConfig>>(&panes_json)
                 {
-                    let cols = terminal_size.width.saturating_sub(2);
-                    let rows = terminal_size.height.saturating_sub(6);
+                    let (cols, rows) = clamp_terminal_dims(
+                        terminal_size.width.saturating_sub(2),
+                        terminal_size.height.saturating_sub(6),
+                    );
                     for pc in &pane_configs {
                         let result = match (&pc.plugin_name, &pc.pane_kind) {
                             (Some(plugin_name), hom_core::PaneKind::Local) => app
@@ -827,8 +1012,9 @@ fn handle_restore(app: &mut App, name: String, terminal_size: ratatui::layout::R
                                     rows,
                                 })
                             }
-                            (None, hom_core::PaneKind::Remote(target)) => app
-                                .spawn_remote_pane_with_opts(RemotePaneSpawnRequest {
+                            (None, hom_core::PaneKind::Remote(target)) => queue_remote_spawn(
+                                app,
+                                RemotePaneSpawnRequest {
                                     harness_type: pc.harness_type,
                                     model: pc.model.clone(),
                                     working_dir: Some(pc.working_dir.clone()),
@@ -836,7 +1022,11 @@ fn handle_restore(app: &mut App, name: String, terminal_size: ratatui::layout::R
                                     target: target.clone(),
                                     cols,
                                     rows,
-                                }),
+                                },
+                                remote_spawn_tx,
+                                remote_spawn_tasks,
+                            )
+                            .map(|()| 0),
                             (Some(plugin_name), hom_core::PaneKind::Remote(_)) => {
                                 Err(hom_core::HomError::Other(format!(
                                     "cannot restore remote plugin pane '{plugin_name}'"
@@ -881,8 +1071,10 @@ fn handle_workflow_request(
             let harness_type = HarnessType::from_str_loose(&harness);
             let result = match harness_type {
                 Some(ht) => {
-                    let cols = terminal_size.width.saturating_sub(2);
-                    let rows = terminal_size.height.saturating_sub(6);
+                    let (cols, rows) = clamp_terminal_dims(
+                        terminal_size.width.saturating_sub(2),
+                        terminal_size.height.saturating_sub(6),
+                    );
                     app.spawn_pane(ht, model, cols, rows)
                 }
                 None => Err(hom_core::HomError::Other(format!(
@@ -1079,6 +1271,29 @@ mod tests {
     }
 
     #[test]
+    fn clamp_terminal_dims_never_returns_zero() {
+        assert_eq!(clamp_terminal_dims(0, 0), (1, 1));
+        assert_eq!(clamp_terminal_dims(80, 0), (80, 1));
+        assert_eq!(clamp_terminal_dims(0, 24), (1, 24));
+    }
+
+    #[test]
+    fn pane_inner_dims_never_returns_zero() {
+        assert_eq!(
+            pane_inner_dims(ratatui::layout::Rect::new(0, 0, 1, 1)),
+            (1, 1)
+        );
+        assert_eq!(
+            pane_inner_dims(ratatui::layout::Rect::new(0, 0, 2, 2)),
+            (1, 1)
+        );
+        assert_eq!(
+            pane_inner_dims(ratatui::layout::Rect::new(0, 0, 10, 6)),
+            (8, 4)
+        );
+    }
+
+    #[test]
     fn resolve_selector_supports_id_and_case_insensitive_name() {
         let mut app = test_app();
         insert_test_pane(&mut app, 7, "Claude Review");
@@ -1102,9 +1317,19 @@ mod tests {
     fn handle_command_sets_expected_local_error_states() {
         let mut app = test_app();
         let (launcher, _rx) = WorkflowLauncher::new();
+        let (remote_spawn_tx, _remote_spawn_rx) = mpsc::unbounded_channel();
+        let mut remote_spawn_tasks = Vec::new();
         let area = ratatui::layout::Rect::new(0, 0, 80, 24);
 
-        handle_command(&mut app, Command::Help, area, &launcher).unwrap();
+        handle_command(
+            &mut app,
+            Command::Help,
+            area,
+            &launcher,
+            &remote_spawn_tx,
+            &mut remote_spawn_tasks,
+        )
+        .unwrap();
         assert!(
             app.command_bar
                 .last_error
@@ -1113,7 +1338,15 @@ mod tests {
                 .contains("commands:")
         );
 
-        handle_command(&mut app, Command::Save("demo".to_string()), area, &launcher).unwrap();
+        handle_command(
+            &mut app,
+            Command::Save("demo".to_string()),
+            area,
+            &launcher,
+            &remote_spawn_tx,
+            &mut remote_spawn_tasks,
+        )
+        .unwrap();
         assert_eq!(
             app.command_bar.last_error.as_deref(),
             Some("no database available for session save")
@@ -1124,6 +1357,8 @@ mod tests {
             Command::Restore("demo".to_string()),
             area,
             &launcher,
+            &remote_spawn_tx,
+            &mut remote_spawn_tasks,
         )
         .unwrap();
         assert_eq!(
@@ -1139,6 +1374,8 @@ mod tests {
             },
             area,
             &launcher,
+            &remote_spawn_tx,
+            &mut remote_spawn_tasks,
         )
         .unwrap();
         assert!(
@@ -1149,7 +1386,15 @@ mod tests {
                 .contains("workflow not found:")
         );
 
-        handle_command(&mut app, Command::Quit, area, &launcher).unwrap();
+        handle_command(
+            &mut app,
+            Command::Quit,
+            area,
+            &launcher,
+            &remote_spawn_tx,
+            &mut remote_spawn_tasks,
+        )
+        .unwrap();
         assert!(app.should_quit);
     }
 

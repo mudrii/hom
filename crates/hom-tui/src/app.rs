@@ -11,11 +11,11 @@ use hom_core::{
     HarnessConfig, HarnessType, HomConfig, HomResult, LayoutKind, OrchestratorCommand, PaneId,
     PaneKind, RemoteTarget, TerminalBackend,
 };
-use hom_pty::{AsyncPtyReader, PtyManager, RemotePtyManager, SshAuthMethod};
+use hom_pty::{AsyncPtyReader, ConnectedRemotePty, PtyManager, RemotePtyManager, SshAuthMethod};
 use hom_terminal::ActiveBackend;
 use hom_web::{WebCell, WebFrame, WebInput, WebPane};
 use tokio::sync::{broadcast, mpsc, mpsc as tokio_mpsc, oneshot};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::command_bar::CommandBar;
 use crate::input::InputRouter;
@@ -73,6 +73,22 @@ pub struct RemotePaneSpawnRequest {
     pub rows: u16,
 }
 
+/// Prepared remote spawn metadata that can be sent to a blocking worker.
+pub struct PreparedRemotePaneSpawn {
+    pub pane_id: PaneId,
+    pub harness_type: HarnessType,
+    pub model: Option<String>,
+    pub working_dir: PathBuf,
+    pub extra_args: Vec<String>,
+    pub title: String,
+    pub target: RemoteTarget,
+    pub cols: u16,
+    pub rows: u16,
+    pub command: String,
+    pub env: HashMap<String, String>,
+    pub auth_methods: Vec<SshAuthMethod>,
+}
+
 /// The top-level application state.
 pub struct App {
     pub config: HomConfig,
@@ -102,6 +118,8 @@ pub struct App {
     pub web_tx: Option<broadcast::Sender<WebFrame>>,
     /// Receives browser keystrokes forwarded by the WebSocket server. None when --web is not set.
     pub web_input_rx: Option<tokio_mpsc::Receiver<WebInput>>,
+    /// Remote panes reserved but still connecting over SSH.
+    pub pending_remote_spawns: usize,
 }
 
 impl App {
@@ -137,6 +155,7 @@ impl App {
             workflow_launcher: None,
             web_tx: None,
             web_input_rx: None,
+            pending_remote_spawns: 0,
         }
     }
 
@@ -195,7 +214,7 @@ impl App {
             rows,
         } = request;
         // Enforce max_panes limit
-        if self.panes.len() >= self.config.general.max_panes {
+        if self.panes.len() + self.pending_remote_spawns >= self.config.general.max_panes {
             return Err(hom_core::HomError::MaxPanesReached(
                 self.config.general.max_panes,
             ));
@@ -354,35 +373,11 @@ impl App {
         (80, 24)
     }
 
-    /// Spawn a harness pane on a remote host via SSH.
-    ///
-    /// Connects to `target` using the default SSH auth sequence (agent, then
-    /// common key files), allocates a PTY, and runs the harness command. The
-    /// resulting SSH channel is wrapped in an `AsyncPtyReader` and wired into
-    /// a `Pane` just like a local pane.
-    pub fn spawn_remote_pane(
-        &mut self,
-        harness_type: HarnessType,
-        model: Option<String>,
-        target: RemoteTarget,
-        cols: u16,
-        rows: u16,
-    ) -> HomResult<PaneId> {
-        self.spawn_remote_pane_with_opts(RemotePaneSpawnRequest {
-            harness_type,
-            model,
-            working_dir: None,
-            extra_args: Vec::new(),
-            target,
-            cols,
-            rows,
-        })
-    }
-
-    pub fn spawn_remote_pane_with_opts(
+    /// Prepare a remote pane spawn for execution on a blocking worker thread.
+    pub fn prepare_remote_pane_spawn(
         &mut self,
         request: RemotePaneSpawnRequest,
-    ) -> HomResult<PaneId> {
+    ) -> HomResult<PreparedRemotePaneSpawn> {
         let RemotePaneSpawnRequest {
             harness_type,
             model,
@@ -392,7 +387,7 @@ impl App {
             cols,
             rows,
         } = request;
-        if self.panes.len() >= self.config.general.max_panes {
+        if self.panes.len() + self.pending_remote_spawns >= self.config.general.max_panes {
             return Err(hom_core::HomError::MaxPanesReached(
                 self.config.general.max_panes,
             ));
@@ -432,22 +427,8 @@ impl App {
 
         let cmd_spec = adapter.build_command(&harness_config);
         let remote_cmd = RemoteTarget::build_remote_command(&cmd_spec);
-
+        let pane_id = self.remote_ptys.reserve_pane_id();
         let auth_methods = SshAuthMethod::defaults();
-        let (pane_id, reader) = self.remote_ptys.spawn(
-            &target,
-            &remote_cmd,
-            &cmd_spec.env,
-            cols,
-            rows,
-            &auth_methods,
-        )?;
-
-        let async_reader = AsyncPtyReader::start(pane_id, reader);
-
-        let scrollback = self.config.general.max_scrollback;
-        let terminal = hom_terminal::create_terminal(cols, rows, scrollback)?;
-
         let effective_model = harness_config.model.as_deref().unwrap_or("");
         let title = format!(
             "{} {} [{}]",
@@ -458,28 +439,110 @@ impl App {
         .trim()
         .to_string();
 
-        let pane = Pane {
-            id: pane_id,
+        self.pending_remote_spawns += 1;
+
+        Ok(PreparedRemotePaneSpawn {
+            pane_id,
             harness_type,
-            pane_kind: PaneKind::Remote(target.clone()),
-            plugin_name: None,
-            model: model.clone(),
+            model,
             working_dir: harness_config.working_dir.clone(),
             extra_args: harness_config.extra_args.clone(),
             title,
+            target,
+            cols,
+            rows,
+            command: remote_cmd,
+            env: cmd_spec.env,
+            auth_methods,
+        })
+    }
+
+    /// Complete a previously prepared remote pane spawn on the app thread.
+    pub fn complete_remote_pane_spawn(
+        &mut self,
+        prepared: PreparedRemotePaneSpawn,
+        connected: ConnectedRemotePty,
+    ) -> HomResult<PaneId> {
+        self.pending_remote_spawns = self.pending_remote_spawns.saturating_sub(1);
+
+        let terminal = hom_terminal::create_terminal(
+            prepared.cols,
+            prepared.rows,
+            self.config.general.max_scrollback,
+        )?;
+        let async_reader = AsyncPtyReader::start(prepared.pane_id, connected.reader);
+
+        self.remote_ptys
+            .insert_session(prepared.pane_id, connected.session);
+
+        let pane = Pane {
+            id: prepared.pane_id,
+            harness_type: prepared.harness_type,
+            pane_kind: PaneKind::Remote(prepared.target.clone()),
+            plugin_name: None,
+            model: prepared.model.clone(),
+            working_dir: prepared.working_dir,
+            extra_args: prepared.extra_args,
+            title: prepared.title,
             terminal,
             pty_reader: Some(async_reader),
             sideband: None,
             exited: None,
         };
 
-        self.panes.insert(pane_id, pane);
-        self.pane_order.push(pane_id);
+        self.panes.insert(prepared.pane_id, pane);
+        self.pane_order.push(prepared.pane_id);
+        self.focused_pane = Some(prepared.pane_id);
+        self.input_router.focus_pane(prepared.pane_id);
 
-        self.focused_pane = Some(pane_id);
-        self.input_router.focus_pane(pane_id);
+        Ok(prepared.pane_id)
+    }
 
-        Ok(pane_id)
+    /// Release a reserved remote spawn slot after a failed connection attempt.
+    pub fn remote_spawn_failed(&mut self) {
+        self.pending_remote_spawns = self.pending_remote_spawns.saturating_sub(1);
+    }
+
+    /// Synchronous helper for tests and non-interactive callers.
+    pub fn spawn_remote_pane_with_opts(
+        &mut self,
+        request: RemotePaneSpawnRequest,
+    ) -> HomResult<PaneId> {
+        let prepared = self.prepare_remote_pane_spawn(request)?;
+        match RemotePtyManager::connect(
+            prepared.target.clone(),
+            prepared.command.clone(),
+            prepared.env.clone(),
+            prepared.cols,
+            prepared.rows,
+            prepared.auth_methods.clone(),
+        ) {
+            Ok(connected) => self.complete_remote_pane_spawn(prepared, connected),
+            Err(err) => {
+                self.remote_spawn_failed();
+                Err(err)
+            }
+        }
+    }
+
+    /// Synchronous helper for tests and non-interactive callers.
+    pub fn spawn_remote_pane(
+        &mut self,
+        harness_type: HarnessType,
+        model: Option<String>,
+        target: RemoteTarget,
+        cols: u16,
+        rows: u16,
+    ) -> HomResult<PaneId> {
+        self.spawn_remote_pane_with_opts(RemotePaneSpawnRequest {
+            harness_type,
+            model,
+            working_dir: None,
+            extra_args: Vec::new(),
+            target,
+            cols,
+            rows,
+        })
     }
 
     fn fallback_input_bytes(command: &OrchestratorCommand) -> Vec<u8> {
@@ -764,8 +827,9 @@ impl App {
     }
 
     /// Serialize the current session (layout + pane configs) for persistence.
-    pub fn session_snapshot(&self) -> (String, String) {
-        let layout_json = serde_json::to_string(&self.layout).unwrap_or_default();
+    pub fn session_snapshot(&self) -> HomResult<(String, String)> {
+        let layout_json = serde_json::to_string(&self.layout)
+            .map_err(|e| hom_core::HomError::Other(format!("serialize layout: {e}")))?;
         let pane_configs: Vec<SessionPaneConfig> = self
             .pane_order
             .iter()
@@ -780,8 +844,9 @@ impl App {
                 })
             })
             .collect();
-        let panes_json = serde_json::to_string(&pane_configs).unwrap_or_default();
-        (layout_json, panes_json)
+        let panes_json = serde_json::to_string(&pane_configs)
+            .map_err(|e| hom_core::HomError::Other(format!("serialize panes: {e}")))?;
+        Ok((layout_json, panes_json))
     }
 
     /// Process up to 16 pending MCP requests per tick to avoid starving the render loop.
@@ -1030,7 +1095,9 @@ impl App {
             })
             .collect();
 
-        let _ = tx.send(WebFrame::new(panes));
+        if let Err(e) = tx.send(WebFrame::new(panes)) {
+            debug!(error = %e, "web frame dropped because there are no active receivers");
+        }
     }
 
     /// Forward browser keystrokes to the targeted pane's PTY.
@@ -1163,7 +1230,7 @@ mod tests {
     #[test]
     fn test_session_snapshot_empty_app() {
         let app = App::new(HomConfig::default());
-        let (layout, panes) = app.session_snapshot();
+        let (layout, panes) = app.session_snapshot().unwrap();
         assert!(!layout.is_empty());
         let parsed: Vec<SessionPaneConfig> = serde_json::from_str(&panes).unwrap();
         assert!(parsed.is_empty());
@@ -1186,6 +1253,34 @@ mod tests {
             newly_exited.is_empty(),
             "expected no exited panes for empty app"
         );
+    }
+
+    #[test]
+    fn spawn_pane_with_opts_rejects_when_max_panes_reached() {
+        let mut config = HomConfig::default();
+        config.general.max_panes = 0;
+        let mut app = App::new(config);
+
+        let err = app
+            .spawn_pane_with_opts(PaneSpawnRequest {
+                harness: Some(HarnessType::ClaudeCode),
+                harness_name: "claude".to_string(),
+                model: None,
+                working_dir: None,
+                extra_args: Vec::new(),
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, hom_core::HomError::MaxPanesReached(0)));
+    }
+
+    #[test]
+    fn kill_pane_returns_not_found_for_unknown_id() {
+        let mut app = App::new(HomConfig::default());
+        let err = app.kill_pane(999).unwrap_err();
+        assert!(matches!(err, hom_core::HomError::PaneNotFound(999)));
     }
 
     #[test]
@@ -1314,7 +1409,7 @@ steps:
         );
         app.pane_order = vec![1, 2];
 
-        let (_, panes_json) = app.session_snapshot();
+        let (_, panes_json) = app.session_snapshot().unwrap();
         let configs: Vec<SessionPaneConfig> = serde_json::from_str(&panes_json).unwrap();
 
         assert_eq!(configs[0].plugin_name, Some("demo-plugin".to_string()));

@@ -210,10 +210,18 @@ fn expand_env_vars(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
     use super::*;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_expand_env_vars_basic() {
+        let _guard = env_lock().lock().unwrap();
         // SAFETY: single-threaded test; no other threads reading this var
         unsafe { std::env::set_var("HOM_TEST_VAR", "hello") };
         let result = expand_env_vars("prefix ${HOM_TEST_VAR} suffix");

@@ -7,6 +7,8 @@
 
 use hom_core::*;
 
+use crate::screen_has_error_line;
+
 pub struct KimiAdapter;
 
 impl KimiAdapter {
@@ -99,7 +101,7 @@ impl HarnessAdapter for KimiAdapter {
 
         if last_line.starts_with('❯') || last_line.starts_with("kimi>") {
             CompletionStatus::WaitingForInput
-        } else if last_lines.contains("Error") || last_lines.contains("error:") {
+        } else if screen_has_error_line(&last_lines) {
             CompletionStatus::Failed { error: last_lines }
         } else {
             CompletionStatus::Running
@@ -179,6 +181,27 @@ mod tests {
         assert!(matches!(
             adapter.detect_completion(&screen),
             CompletionStatus::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_parse_screen_extracts_stream_json_events() {
+        let adapter = KimiAdapter::new();
+        let screen = make_screen(&[
+            r#"{"type":"file_change","path":"src/lib.rs"}"#,
+            r#"{"type":"output","content":"hello"}"#,
+        ]);
+        let events = adapter.parse_screen(&screen);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            HarnessEvent::FileChanged { path, change_type }
+                if path == &std::path::PathBuf::from("src/lib.rs")
+                    && *change_type == ChangeType::Modified
+        ));
+        assert!(matches!(
+            &events[1],
+            HarnessEvent::OutputChunk { content } if content == "hello"
         ));
     }
 

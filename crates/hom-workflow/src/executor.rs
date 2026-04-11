@@ -34,6 +34,17 @@ pub enum StepStatus {
     TimedOut,
 }
 
+impl StepStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
 /// Result of an entire workflow execution.
 #[derive(Debug)]
 pub struct WorkflowResult {
@@ -591,6 +602,7 @@ async fn execute_step(runtime: Arc<dyn WorkflowRuntime>, step: RunnableStep) -> 
     // Execute fallback if configured
     let fallback_result =
         if let Some((fb_id, fb_harness, fb_model, fb_prompt, fb_timeout)) = step.fallback_info {
+            let fallback_start = std::time::Instant::now();
             warn!(step = %step.step_id, fallback = %fb_id, "executing fallback step");
             match runtime.spawn_pane(&fb_harness, fb_model.as_deref()).await {
                 Ok(fb_pane) => match runtime.send_and_wait(fb_pane, &fb_prompt, fb_timeout).await {
@@ -599,7 +611,7 @@ async fn execute_step(runtime: Arc<dyn WorkflowRuntime>, step: RunnableStep) -> 
                             step_id: fb_id.clone(),
                             status: StepStatus::Completed,
                             output: fb_output.clone(),
-                            duration: step_start.elapsed(),
+                            duration: fallback_start.elapsed(),
                             attempt: 1,
                         };
                         let _ = runtime.kill_pane(fb_pane).await;
@@ -867,6 +879,92 @@ steps:
         assert_eq!(result.step_results["deploy"].status, StepStatus::Skipped);
     }
 
+    struct AlwaysFailRuntime;
+
+    #[async_trait::async_trait]
+    impl WorkflowRuntime for AlwaysFailRuntime {
+        async fn spawn_pane(&self, _harness: &str, _model: Option<&str>) -> HomResult<u32> {
+            Ok(1)
+        }
+
+        async fn send_and_wait(
+            &self,
+            _pane_id: u32,
+            _prompt: &str,
+            _timeout: Duration,
+        ) -> HomResult<String> {
+            Err(HomError::Other("boom".to_string()))
+        }
+
+        async fn kill_pane(&self, _pane_id: u32) -> HomResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_action_abort_is_the_default_workflow_outcome() {
+        let yaml = r#"
+name: abort-default
+steps:
+  - id: plan
+    harness: claude
+    prompt: "do it"
+"#;
+        let def = WorkflowDef::from_yaml(yaml).unwrap();
+        let executor = WorkflowExecutor::new();
+
+        let result = executor
+            .execute(&def, Arc::new(AlwaysFailRuntime), HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result.status,
+            WorkflowStatus::Failed { ref step, ref error }
+                if step == "plan" && error.contains("boom")
+        ));
+        assert_eq!(result.step_results["plan"].status, StepStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn retry_exhaustion_marks_step_failed_after_last_attempt() {
+        let yaml = r#"
+name: retry-failure
+steps:
+  - id: plan
+    harness: claude
+    prompt: "do it"
+    retry:
+      max_attempts: 2
+      backoff: fixed
+"#;
+        let def = WorkflowDef::from_yaml(yaml).unwrap();
+        let executor = WorkflowExecutor::new();
+
+        let result = executor
+            .execute(&def, Arc::new(AlwaysFailRuntime), HashMap::new())
+            .await
+            .unwrap();
+
+        let step = &result.step_results["plan"];
+        assert_eq!(step.status, StepStatus::Failed);
+        assert_eq!(step.attempt, 2);
+        assert!(matches!(result.status, WorkflowStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn build_template_context_exposes_top_level_vars_and_nested_step_fields() {
+        let vars = HashMap::from([(String::from("task"), String::from("ship"))]);
+        let outputs = HashMap::from([(String::from("plan"), String::from("outline"))]);
+        let statuses = HashMap::from([(String::from("plan"), String::from("completed"))]);
+
+        let ctx = build_template_context(&vars, &outputs, &statuses);
+
+        assert_eq!(ctx["task"], "ship");
+        assert_eq!(ctx["steps"]["plan"]["output"], "outline");
+        assert_eq!(ctx["steps"]["plan"]["status"], "completed");
+    }
+
     #[test]
     fn test_compute_backoff_exponential() {
         assert_eq!(
@@ -912,6 +1010,68 @@ steps:
         assert_eq!(
             compute_backoff(&BackoffKind::Fixed, 5),
             Duration::from_secs(2)
+        );
+    }
+
+    struct FallbackRuntime;
+
+    #[async_trait::async_trait]
+    impl WorkflowRuntime for FallbackRuntime {
+        async fn spawn_pane(&self, harness: &str, _model: Option<&str>) -> HomResult<u32> {
+            Ok(if harness == "fallback" { 2 } else { 1 })
+        }
+
+        async fn send_and_wait(
+            &self,
+            pane_id: u32,
+            _prompt: &str,
+            _timeout: Duration,
+        ) -> HomResult<String> {
+            if pane_id == 1 {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                Err(HomError::Other("primary failed".to_string()))
+            } else {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                Ok("fallback ok".to_string())
+            }
+        }
+
+        async fn kill_pane(&self, _pane_id: u32) -> HomResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_step_duration_is_measured_from_fallback_start() {
+        let yaml = r#"
+name: fallback-duration
+steps:
+  - id: plan
+    harness: primary
+    prompt: "primary"
+    on_failure:
+      fallback: recover
+  - id: recover
+    harness: fallback
+    prompt: "recover"
+"#;
+        let def = WorkflowDef::from_yaml(yaml).unwrap();
+        let executor = WorkflowExecutor::new();
+
+        let result = executor
+            .execute(&def, Arc::new(FallbackRuntime), HashMap::new())
+            .await
+            .unwrap();
+
+        let primary = &result.step_results["plan"];
+        let fallback = &result.step_results["recover"];
+        assert!(matches!(primary.status, StepStatus::Failed));
+        assert!(matches!(fallback.status, StepStatus::Completed));
+        assert!(
+            fallback.duration < primary.duration,
+            "fallback duration {:?} should be shorter than primary duration {:?}",
+            fallback.duration,
+            primary.duration
         );
     }
 }

@@ -161,4 +161,28 @@ mod tests {
         assert_eq!(pane_at_position(&pane_areas, 99, 9), Some(2));
         assert_eq!(pane_at_position(&pane_areas, 100, 9), None);
     }
+
+    #[test]
+    fn tiny_terminal_layout_stays_within_bounds() {
+        let panes = vec![1, 2];
+        let area = Rect::new(0, 0, 1, 1);
+        let areas = compute_pane_areas(area, &panes, &LayoutKind::Grid);
+
+        assert_eq!(areas.len(), panes.len());
+        assert!(
+            areas
+                .iter()
+                .all(|(_, rect)| rect.x >= area.x && rect.y >= area.y)
+        );
+        assert!(
+            areas
+                .iter()
+                .all(|(_, rect)| rect.x + rect.width <= area.x + area.width)
+        );
+        assert!(
+            areas
+                .iter()
+                .all(|(_, rect)| rect.y + rect.height <= area.y + area.height)
+        );
+    }
 }

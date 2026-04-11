@@ -192,15 +192,27 @@ impl RpcSideband {
             let mut stdin = handles.stdin.lock().await;
             if let Err(e) = stdin.write_all(&request_bytes).await {
                 handles.pending.lock().await.remove(&id);
+                self.reset_process().await;
                 return Err(HomError::AdapterError(format!("RPC write: {e}")));
             }
             if let Err(e) = stdin.flush().await {
                 handles.pending.lock().await.remove(&id);
+                self.reset_process().await;
                 return Err(HomError::AdapterError(format!("RPC flush: {e}")));
             }
         }
 
         Ok(rx)
+    }
+
+    async fn reset_process(&self) {
+        let mut process_guard = self.process.lock().await;
+        if let Some(mut process) = process_guard.take() {
+            process.reader_task.abort();
+            if let Err(e) = process.child.kill().await {
+                warn!(program = %self.program, error = %e, "failed to kill broken RPC subprocess");
+            }
+        }
     }
 }
 
@@ -369,6 +381,50 @@ for line in sys.stdin:
         path.to_string_lossy().into_owned()
     }
 
+    fn flaky_stdin_rpc_program(counter_path: &std::path::Path) -> String {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hom-flaky-rpc-{unique}.sh"));
+        let counter = counter_path.display();
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+import time
+
+counter = pathlib.Path(r"{counter}")
+count = int(counter.read_text()) if counter.exists() else 0
+count += 1
+counter.write_text(str(count))
+
+if count == 1:
+    os.close(0)
+    time.sleep(0.2)
+    sys.exit(0)
+
+for line in sys.stdin:
+    req = json.loads(line)
+    sys.stdout.write(json.dumps({{
+        "jsonrpc": "2.0",
+        "result": req["method"],
+        "id": req["id"],
+    }}) + "\n")
+    sys.stdout.flush()
+"#
+        );
+
+        fs::write(&path, script).unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn test_rpc_sideband_new() {
         let rpc = RpcSideband::new("pi".to_string());
@@ -410,5 +466,24 @@ for line in sys.stdin:
 
         assert_eq!(prompt.unwrap(), "HELLO");
         assert!(healthy.unwrap());
+    }
+
+    #[tokio::test]
+    async fn write_failure_resets_process_and_next_request_spawns_fresh_child() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let counter_path = std::env::temp_dir().join(format!("hom-rpc-count-{unique}.txt"));
+        let rpc = RpcSideband::new(flaky_stdin_rpc_program(&counter_path));
+
+        let first = rpc.send_prompt("hello").await;
+        assert!(first.is_err());
+
+        let second = rpc.send_prompt("hello").await.unwrap();
+        assert_eq!(second, "prompt");
+
+        let launch_count = fs::read_to_string(counter_path).unwrap();
+        assert_eq!(launch_count.trim(), "2");
     }
 }

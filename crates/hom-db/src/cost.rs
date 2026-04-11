@@ -62,16 +62,16 @@ mod tests {
     use super::*;
     use crate::HomDb;
 
-    async fn open_temp_db() -> HomDb {
+    async fn open_temp_db() -> (tempfile::TempDir, HomDb) {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("hom.sqlite");
-        std::mem::forget(temp);
-        HomDb::open(db_path.to_str().unwrap()).await.unwrap()
+        let db = HomDb::open(db_path.to_str().unwrap()).await.unwrap();
+        (temp, db)
     }
 
     #[tokio::test]
     async fn total_cost_is_zero_for_empty_log() {
-        let db = open_temp_db().await;
+        let (_temp, db) = open_temp_db().await;
 
         assert_eq!(total_cost(db.pool()).await.unwrap(), 0.0);
         assert!(cost_by_harness(db.pool()).await.unwrap().is_empty());
@@ -79,7 +79,7 @@ mod tests {
 
     #[tokio::test]
     async fn log_cost_aggregates_totals_and_groups_by_harness() {
-        let db = open_temp_db().await;
+        let (_temp, db) = open_temp_db().await;
 
         log_cost(db.pool(), 1, "claude", Some("opus"), 10, 20, 1.25)
             .await

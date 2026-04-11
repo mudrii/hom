@@ -186,7 +186,7 @@ impl CommandBar {
 /// Split a string respecting single and double quotes.
 ///
 /// `"hello world" foo 'bar baz'` → `["hello world", "foo", "bar baz"]`
-fn shell_split(input: &str) -> Vec<String> {
+fn shell_split(input: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
@@ -217,10 +217,16 @@ fn shell_split(input: &str) -> Vec<String> {
             _ => current.push(ch),
         }
     }
+    if escape_next {
+        return Err("unterminated escape sequence".to_string());
+    }
+    if in_single || in_double {
+        return Err("unclosed quote in command".to_string());
+    }
     if !current.is_empty() {
         tokens.push(current);
     }
-    tokens
+    Ok(tokens)
 }
 
 /// Parse a command string into a Command.
@@ -245,7 +251,7 @@ fn parse_command(input: &str) -> Result<Command, String> {
             let mut remote: Option<RemoteTarget> = None;
 
             if let Some(rest) = parts.get(2) {
-                let tokens = shell_split(rest);
+                let tokens = shell_split(rest)?;
                 let mut i = 0;
                 let mut collecting_extra = false;
 
@@ -294,11 +300,20 @@ fn parse_command(input: &str) -> Result<Command, String> {
             })
         }
         Some("load-plugin") => {
-            let path = parts
-                .get(1)
-                .ok_or_else(|| "usage: :load-plugin <path>".to_string())?;
+            let rest = input
+                .strip_prefix("load-plugin")
+                .or_else(|| input.strip_prefix("load"))
+                .unwrap_or("")
+                .trim();
+            if rest.is_empty() {
+                return Err("usage: :load-plugin <path>".to_string());
+            }
+            let tokens = shell_split(rest)?;
+            if tokens.len() != 1 {
+                return Err("usage: :load-plugin <path>".to_string());
+            }
             Ok(Command::LoadPlugin {
-                path: PathBuf::from(path),
+                path: PathBuf::from(&tokens[0]),
             })
         }
         Some("focus") | Some("f") => {
@@ -368,21 +383,30 @@ fn parse_command(input: &str) -> Result<Command, String> {
             // Parse --var key=value pairs from the rest of the input
             if parts.len() > 2 {
                 let rest = parts[2];
-                let tokens = shell_split(rest);
+                let tokens = shell_split(rest)?;
                 let mut i = 0;
                 while i < tokens.len() {
                     if tokens[i] == "--var" {
                         if i + 1 < tokens.len() {
                             if let Some((k, v)) = tokens[i + 1].split_once('=') {
                                 variables.insert(k.to_string(), v.to_string());
+                            } else {
+                                return Err(format!(
+                                    "invalid --var value '{}': expected key=value",
+                                    tokens[i + 1]
+                                ));
                             }
                             i += 2;
                         } else {
-                            i += 1;
+                            return Err("--var requires key=value".to_string());
                         }
                     } else if let Some(rest_kv) = tokens[i].strip_prefix("--var=") {
                         if let Some((k, v)) = rest_kv.split_once('=') {
                             variables.insert(k.to_string(), v.to_string());
+                        } else {
+                            return Err(format!(
+                                "invalid --var value '{rest_kv}': expected key=value"
+                            ));
                         }
                         i += 1;
                     } else {
@@ -537,39 +561,61 @@ mod tests {
     }
 
     #[test]
+    fn load_plugin_parses_quoted_path_with_spaces() {
+        let cmd = CommandBar::parse_command("load-plugin \"/tmp/my plugin.dylib\"").unwrap();
+        match cmd {
+            Command::LoadPlugin { path } => {
+                assert_eq!(path, PathBuf::from("/tmp/my plugin.dylib"));
+            }
+            _ => panic!("expected LoadPlugin"),
+        }
+    }
+
+    #[test]
     fn shell_split_basic() {
-        assert_eq!(shell_split("hello world"), vec!["hello", "world"],);
+        assert_eq!(shell_split("hello world").unwrap(), vec!["hello", "world"],);
     }
 
     #[test]
     fn shell_split_double_quotes() {
         assert_eq!(
-            shell_split(r#""hello world" foo"#),
+            shell_split(r#""hello world" foo"#).unwrap(),
             vec!["hello world", "foo"],
         );
     }
 
     #[test]
     fn shell_split_single_quotes() {
-        assert_eq!(shell_split("'hello world' foo"), vec!["hello world", "foo"],);
+        assert_eq!(
+            shell_split("'hello world' foo").unwrap(),
+            vec!["hello world", "foo"],
+        );
     }
 
     #[test]
     fn shell_split_mixed_quotes() {
         assert_eq!(
-            shell_split(r#"--var task="add auth" --var lang='rust'"#),
+            shell_split(r#"--var task="add auth" --var lang='rust'"#).unwrap(),
             vec!["--var", "task=add auth", "--var", "lang=rust"],
         );
     }
 
     #[test]
     fn shell_split_escaped_space() {
-        assert_eq!(shell_split(r"hello\ world foo"), vec!["hello world", "foo"],);
+        assert_eq!(
+            shell_split(r"hello\ world foo").unwrap(),
+            vec!["hello world", "foo"],
+        );
     }
 
     #[test]
     fn shell_split_empty() {
-        assert_eq!(shell_split(""), Vec::<String>::new());
+        assert_eq!(shell_split("").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn shell_split_rejects_unclosed_quote() {
+        assert!(shell_split("\"unterminated").is_err());
     }
 
     #[test]
@@ -584,6 +630,24 @@ mod tests {
                 assert_eq!(variables.get("task").unwrap(), "add auth middleware");
             }
             _ => panic!("expected Run command"),
+        }
+    }
+
+    #[test]
+    fn parse_run_rejects_var_without_equals() {
+        let err = parse_command("run code-review --var task").unwrap_err();
+        assert!(err.contains("expected key=value"));
+    }
+
+    #[test]
+    fn parse_send_allows_empty_quoted_input() {
+        let cmd = parse_command("send 1 \"\"").unwrap();
+        match cmd {
+            Command::Send {
+                target: PaneSelector::Id(1),
+                input,
+            } => assert!(input.is_empty()),
+            _ => panic!("expected Send to pane 1 with empty input"),
         }
     }
 }

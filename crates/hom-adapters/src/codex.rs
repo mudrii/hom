@@ -8,6 +8,8 @@
 
 use hom_core::*;
 
+use crate::screen_has_error_line;
+
 pub struct CodexAdapter;
 
 impl CodexAdapter {
@@ -104,7 +106,7 @@ impl HarnessAdapter for CodexAdapter {
 
         if last_line.starts_with("$ ") || last_line == "$" || last_line.starts_with("codex>") {
             CompletionStatus::WaitingForInput
-        } else if last_lines.contains("Error") || last_lines.contains("error:") {
+        } else if screen_has_error_line(&last_lines) {
             CompletionStatus::Failed { error: last_lines }
         } else {
             CompletionStatus::Running
@@ -188,9 +190,41 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_screen_extracts_json_events() {
+        let adapter = CodexAdapter::new();
+        let screen = make_screen(&[
+            r#"{"type":"file_change","path":"src/lib.rs"}"#,
+            r#"{"type":"command","command":"cargo test","exit_code":1}"#,
+        ]);
+        let events = adapter.parse_screen(&screen);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            HarnessEvent::FileChanged { path, change_type }
+                if path == &std::path::PathBuf::from("src/lib.rs")
+                    && *change_type == ChangeType::Modified
+        ));
+        assert!(matches!(
+            &events[1],
+            HarnessEvent::CommandExecuted { command, exit_code }
+                if command == "cargo test" && *exit_code == Some(1)
+        ));
+    }
+
+    #[test]
     fn test_no_false_positive_on_code_with_angle_bracket() {
         let adapter = CodexAdapter::new();
         let screen = make_screen(&["if x > 0 {", "    println!(\"hi\");", "}", "compiling..."]);
+        assert!(matches!(
+            adapter.detect_completion(&screen),
+            CompletionStatus::Running
+        ));
+    }
+
+    #[test]
+    fn test_no_false_positive_on_no_errors_found() {
+        let adapter = CodexAdapter::new();
+        let screen = make_screen(&["No errors found"]);
         assert!(matches!(
             adapter.detect_completion(&screen),
             CompletionStatus::Running

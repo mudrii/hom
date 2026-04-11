@@ -173,8 +173,8 @@ impl PluginAdapter {
         })
     }
 
-    /// Serialize a `ScreenSnapshot` to a JSON string for the plugin boundary.
-    fn snapshot_to_json(screen: &ScreenSnapshot) -> String {
+    /// Serialize a `ScreenSnapshot` to JSON for the plugin boundary.
+    fn snapshot_to_json(screen: &ScreenSnapshot) -> Result<String, serde_json::Error> {
         #[derive(Serialize)]
         struct SerializableScreenSnapshot {
             rows: Vec<Vec<SerializableCell>>,
@@ -299,7 +299,6 @@ impl PluginAdapter {
             num_rows: screen.num_rows,
             cursor: cursor_to_json(&screen.cursor),
         })
-        .unwrap_or_else(|_| "{\"rows\":[],\"cols\":0,\"num_rows\":0,\"cursor\":{\"row\":0,\"col\":0,\"visible\":true}}".to_string())
     }
 }
 
@@ -412,7 +411,13 @@ impl hom_core::HarnessAdapter for PluginAdapter {
     }
 
     fn parse_screen(&self, screen: &ScreenSnapshot) -> Vec<HarnessEvent> {
-        let screen_json = Self::snapshot_to_json(screen);
+        let screen_json = match Self::snapshot_to_json(screen) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!(plugin = %self.plugin_name(), error = %e, "failed to serialize screen snapshot for parse_screen");
+                return Vec::new();
+            }
+        };
 
         // SAFETY: parse_screen vtable fn is valid.
         let result = unsafe { self.call_json_fn((*self.vtable).parse_screen, &screen_json) };
@@ -423,7 +428,13 @@ impl hom_core::HarnessAdapter for PluginAdapter {
     }
 
     fn detect_completion(&self, screen: &ScreenSnapshot) -> CompletionStatus {
-        let screen_json = Self::snapshot_to_json(screen);
+        let screen_json = match Self::snapshot_to_json(screen) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!(plugin = %self.plugin_name(), error = %e, "failed to serialize screen snapshot for detect_completion");
+                return CompletionStatus::Running;
+            }
+        };
 
         // SAFETY: detect_completion vtable fn is valid.
         let result = unsafe { self.call_json_fn((*self.vtable).detect_completion, &screen_json) };
@@ -546,7 +557,7 @@ mod tests {
             },
         };
 
-        let json = PluginAdapter::snapshot_to_json(&snapshot);
+        let json = PluginAdapter::snapshot_to_json(&snapshot).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["cols"], 1);
         assert_eq!(value["num_rows"], 1);

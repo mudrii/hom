@@ -61,16 +61,16 @@ mod tests {
     use super::*;
     use crate::HomDb;
 
-    async fn open_temp_db() -> HomDb {
+    async fn open_temp_db() -> (tempfile::TempDir, HomDb) {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("hom.sqlite");
-        std::mem::forget(temp);
-        HomDb::open(db_path.to_str().unwrap()).await.unwrap()
+        let db = HomDb::open(db_path.to_str().unwrap()).await.unwrap();
+        (temp, db)
     }
 
     #[tokio::test]
     async fn save_and_load_session_round_trip() {
-        let db = open_temp_db().await;
+        let (_temp, db) = open_temp_db().await;
 
         save_session(
             db.pool(),
@@ -93,8 +93,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_session_returns_none_for_missing_name() {
+        let (_temp, db) = open_temp_db().await;
+        let loaded = load_session(db.pool(), "missing").await.unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
     async fn load_session_returns_latest_row_for_name_and_list_is_distinct() {
-        let db = open_temp_db().await;
+        let (_temp, db) = open_temp_db().await;
 
         save_session(db.pool(), "old", "shared", "\"hsplit\"", "[{\"id\":1}]")
             .await
