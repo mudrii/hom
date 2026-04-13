@@ -116,7 +116,11 @@ mod tests {
     fn parse_send_to_pane() {
         let args = json!({"pane_id": "p1", "text": "hello world"});
         let cmd = parse_command("send_to_pane", &args).unwrap();
-        assert!(matches!(cmd, McpCommand::SendToPane { ref text, .. } if text == "hello world"));
+        assert!(matches!(
+            cmd,
+            McpCommand::SendToPane { ref pane_id, ref text }
+            if pane_id == "p1" && text == "hello world"
+        ));
     }
 
     #[test]

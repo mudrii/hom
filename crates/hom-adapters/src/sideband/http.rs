@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tracing::debug;
 
 use hom_core::{HarnessEvent, HomError, HomResult, SidebandChannel};
@@ -27,6 +28,7 @@ pub struct HttpSideband {
 }
 
 static RUSTLS_PROVIDER_INSTALLED: OnceLock<()> = OnceLock::new();
+const SSE_IDLE_TIMEOUT: Duration = Duration::from_millis(50);
 
 impl HttpSideband {
     pub fn new(base_url: String) -> Self {
@@ -46,6 +48,46 @@ impl HttpSideband {
     pub fn with_session(mut self, session_id: String) -> Self {
         self.session_id = Some(session_id);
         self
+    }
+
+    fn parse_sse_events(body: &str) -> Vec<HarnessEvent> {
+        let mut events = Vec::new();
+
+        for line in body.lines() {
+            if let Some(data) = line.strip_prefix("data: ")
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
+                && let Some(event_type) = value.get("type").and_then(|t| t.as_str())
+            {
+                match event_type {
+                    "token_usage" => {
+                        let input = value.get("input").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let output = value.get("output").and_then(|v| v.as_u64()).unwrap_or(0);
+                        events.push(HarnessEvent::TokenUsage { input, output });
+                    }
+                    "task_completed" => {
+                        let summary = value
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        events.push(HarnessEvent::TaskCompleted { summary });
+                    }
+                    "error" => {
+                        let message = value
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        events.push(HarnessEvent::Error { message });
+                    }
+                    _ => {
+                        debug!(event_type, "unknown SSE event type");
+                    }
+                }
+            }
+        }
+
+        events
     }
 }
 
@@ -91,7 +133,7 @@ impl SidebandChannel for HttpSideband {
     async fn get_events(&self) -> HomResult<Vec<HarnessEvent>> {
         let url = format!("{}/global/event", self.base_url);
 
-        let resp = match self.client.get(&url).send().await {
+        let mut resp = match self.client.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
                 debug!(url, error = %e, "SSE poll failed");
@@ -103,51 +145,20 @@ impl SidebandChannel for HttpSideband {
             return Ok(Vec::new());
         }
 
-        let body = match resp.text().await {
-            Ok(body) => body,
-            Err(e) => {
-                debug!(url, error = %e, "failed to read SSE response body");
-                return Ok(Vec::new());
-            }
-        };
-        let mut events = Vec::new();
-
-        // Parse SSE format: lines starting with "data: " contain JSON
-        for line in body.lines() {
-            if let Some(data) = line.strip_prefix("data: ")
-                && let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
-                && let Some(event_type) = value.get("type").and_then(|t| t.as_str())
-            {
-                match event_type {
-                    "token_usage" => {
-                        let input = value.get("input").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let output = value.get("output").and_then(|v| v.as_u64()).unwrap_or(0);
-                        events.push(HarnessEvent::TokenUsage { input, output });
-                    }
-                    "task_completed" => {
-                        let summary = value
-                            .get("summary")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        events.push(HarnessEvent::TaskCompleted { summary });
-                    }
-                    "error" => {
-                        let message = value
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        events.push(HarnessEvent::Error { message });
-                    }
-                    _ => {
-                        debug!(event_type, "unknown SSE event type");
-                    }
+        let mut body = Vec::new();
+        loop {
+            match tokio::time::timeout(SSE_IDLE_TIMEOUT, resp.chunk()).await {
+                Ok(Ok(Some(chunk))) => body.extend_from_slice(&chunk),
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
+                    debug!(url, error = %e, "failed while reading SSE chunk");
+                    return Ok(Vec::new());
                 }
+                Err(_) => break,
             }
         }
 
-        Ok(events)
+        Ok(Self::parse_sse_events(&String::from_utf8_lossy(&body)))
     }
 
     async fn health_check(&self) -> HomResult<bool> {
@@ -196,5 +207,28 @@ mod tests {
         let sb = HttpSideband::new("http://127.0.0.1:19999".to_string());
         let events = sb.get_events().await.unwrap();
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_sse_events_extracts_supported_event_types() {
+        let body = concat!(
+            "data: {\"type\":\"token_usage\",\"input\":3,\"output\":5}\n",
+            "data: {\"type\":\"task_completed\",\"summary\":\"done\"}\n",
+            "data: {\"type\":\"error\",\"message\":\"boom\"}\n"
+        );
+
+        let events = HttpSideband::parse_sse_events(body);
+        assert!(matches!(
+            &events[0],
+            HarnessEvent::TokenUsage { input, output } if *input == 3 && *output == 5
+        ));
+        assert!(matches!(
+            &events[1],
+            HarnessEvent::TaskCompleted { summary } if summary == "done"
+        ));
+        assert!(matches!(
+            &events[2],
+            HarnessEvent::Error { message } if message == "boom"
+        ));
     }
 }

@@ -100,6 +100,8 @@ hom --web --web-port 8080
 :load-plugin ~/.config/hom/plugins/mycli.dylib
 ```
 
+For a tester-oriented checklist and launch guide, see [docs/manual-testing.md](docs/manual-testing.md).
+
 ## Commands
 
 | Command | Description |

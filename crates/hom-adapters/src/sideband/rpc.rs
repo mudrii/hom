@@ -214,6 +214,27 @@ impl RpcSideband {
             }
         }
     }
+
+    fn rpc_error_message(response: &serde_json::Value) -> Option<String> {
+        response
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+            .map(ToOwned::to_owned)
+            .or_else(|| response.get("error").map(ToString::to_string))
+    }
+
+    fn string_result(response: &serde_json::Value) -> HomResult<String> {
+        match response.get("result") {
+            Some(serde_json::Value::String(result)) => Ok(result.clone()),
+            Some(other) => Err(HomError::AdapterError(format!(
+                "RPC result was not a string: {other}"
+            ))),
+            None => Err(HomError::AdapterError(
+                "RPC response did not contain a result".to_string(),
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -226,16 +247,11 @@ impl SidebandChannel for RpcSideband {
             .await
             .map_err(|_| HomError::AdapterError("RPC response channel closed".to_string()))??;
 
-        if let Some(error) = response.get("error") {
+        if let Some(error) = Self::rpc_error_message(&response) {
             return Err(HomError::AdapterError(format!("RPC error: {error}")));
         }
 
-        let result = response
-            .get("result")
-            .and_then(|r| r.as_str())
-            .unwrap_or("")
-            .to_string();
-
+        let result = Self::string_result(&response)?;
         debug!("RPC prompt sent and response received");
         Ok(result)
     }
@@ -423,6 +439,24 @@ for line in sys.stdin:
         fs::set_permissions(&path, perms).unwrap();
 
         path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn rpc_error_message_prefers_message_field() {
+        let response = serde_json::json!({
+            "error": { "code": -32601, "message": "method not found" }
+        });
+        assert_eq!(
+            RpcSideband::rpc_error_message(&response).as_deref(),
+            Some("method not found")
+        );
+    }
+
+    #[test]
+    fn string_result_rejects_non_string_payloads() {
+        let response = serde_json::json!({ "result": { "ok": true } });
+        let err = RpcSideband::string_result(&response).unwrap_err();
+        assert!(err.to_string().contains("not a string"));
     }
 
     #[test]

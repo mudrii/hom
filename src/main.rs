@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -126,6 +127,29 @@ fn parse_var(s: &str) -> Result<(String, String), String> {
         return Err(format!("invalid variable format: {s} (expected key=value)"));
     }
     Ok((parts[0].to_string(), parts[1].to_string()))
+}
+
+fn resolve_workflow_name_path(workflow_dir: &Path, workflow: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(workflow);
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("invalid workflow name: {workflow}"));
+    }
+
+    let workflow_dir = workflow_dir
+        .canonicalize()
+        .unwrap_or_else(|_| workflow_dir.to_path_buf());
+    let workflow_path = workflow_dir.join(format!("{workflow}.yaml"));
+
+    if let Ok(canonical) = workflow_path.canonicalize()
+        && !canonical.starts_with(&workflow_dir)
+    {
+        return Err(format!("workflow path escapes workflow dir: {workflow}"));
+    }
+
+    Ok(workflow_path)
 }
 
 fn clamp_terminal_dims(cols: u16, rows: u16) -> (u16, u16) {
@@ -314,32 +338,47 @@ async fn main() -> anyhow::Result<()> {
     // Wire CLI --run/--var: if a workflow was specified, launch it
     if let Some(workflow_name) = &cli.run {
         let workflow_dir = app.config.workflow_dir();
-        let workflow_path = workflow_dir.join(format!("{workflow_name}.yaml"));
-        match hom_workflow::WorkflowDef::from_file(&workflow_path) {
-            Ok(def) => {
-                app.workflow_progress = Some(WorkflowProgress::new(
-                    workflow_name.to_string(),
-                    def.steps.iter().map(|s| s.id.clone()).collect(),
-                ));
-                let variables: HashMap<String, String> = cli.vars.iter().cloned().collect();
-                match workflow_launcher.launch(def, variables, workflow_path.display().to_string())
-                {
-                    Ok(workflow_id) => {
-                        info!(
-                            workflow = %workflow_name,
-                            workflow_id,
-                            vars = ?cli.vars,
-                            "workflow launched via CLI"
-                        );
-                    }
-                    Err(e) => {
-                        app.command_bar.last_error = Some(format!("workflow launch error: {e}"));
+        let workflow_path = match resolve_workflow_name_path(&workflow_dir, workflow_name) {
+            Ok(path) => path,
+            Err(e) => {
+                app.command_bar.last_error = Some(e.clone());
+                warn!(workflow = %workflow_name, error = %e, "rejected CLI workflow name");
+                PathBuf::new()
+            }
+        };
+        if workflow_path.as_os_str().is_empty() {
+            // Already surfaced above.
+        } else {
+            match hom_workflow::WorkflowDef::from_file(&workflow_path) {
+                Ok(def) => {
+                    app.workflow_progress = Some(WorkflowProgress::new(
+                        workflow_name.to_string(),
+                        def.steps.iter().map(|s| s.id.clone()).collect(),
+                    ));
+                    let variables: HashMap<String, String> = cli.vars.iter().cloned().collect();
+                    match workflow_launcher.launch(
+                        def,
+                        variables,
+                        workflow_path.display().to_string(),
+                    ) {
+                        Ok(workflow_id) => {
+                            info!(
+                                workflow = %workflow_name,
+                                workflow_id,
+                                vars = ?cli.vars,
+                                "workflow launched via CLI"
+                            );
+                        }
+                        Err(e) => {
+                            app.command_bar.last_error =
+                                Some(format!("workflow launch error: {e}"));
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                warn!(workflow = %workflow_name, error = %e, "failed to load CLI workflow");
-                app.command_bar.last_error = Some(format!("workflow load error: {e}"));
+                Err(e) => {
+                    warn!(workflow = %workflow_name, error = %e, "failed to load CLI workflow");
+                    app.command_bar.last_error = Some(format!("workflow load error: {e}"));
+                }
             }
         }
     }
@@ -891,7 +930,13 @@ fn handle_run(
 ) -> anyhow::Result<()> {
     // Load workflow from config workflow dir
     let workflow_dir = app.config.workflow_dir();
-    let workflow_path = workflow_dir.join(format!("{workflow}.yaml"));
+    let workflow_path = match resolve_workflow_name_path(&workflow_dir, &workflow) {
+        Ok(path) => path,
+        Err(e) => {
+            app.command_bar.last_error = Some(e);
+            return Ok(());
+        }
+    };
     if workflow_path.exists() {
         match hom_workflow::parser::WorkflowDef::from_file(&workflow_path) {
             Ok(def) => {

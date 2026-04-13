@@ -247,7 +247,24 @@ mod tests {
             params: json!({}),
         };
 
-        assert!(server.dispatch(req).await.is_some());
+        let response = server.dispatch(req).await.unwrap();
+        let value = serde_json::to_value(response).unwrap();
+        let tools = value["result"]["tools"].as_array().unwrap();
+        let names: Vec<_> = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "spawn_pane",
+                "send_to_pane",
+                "run_workflow",
+                "list_panes",
+                "get_pane_output",
+                "kill_pane",
+            ]
+        );
     }
 
     #[tokio::test]

@@ -1185,13 +1185,6 @@ mod tests {
     use crate::workflow_bridge::WorkflowLauncher;
 
     #[test]
-    fn app_has_remote_pty_manager() {
-        let cfg = hom_core::HomConfig::default();
-        let app = App::new(cfg);
-        assert_eq!(app.remote_ptys.active_panes().len(), 0);
-    }
-
-    #[test]
     fn test_session_pane_config_roundtrip() {
         let configs = vec![
             SessionPaneConfig {
@@ -1231,18 +1224,28 @@ mod tests {
     fn test_session_snapshot_empty_app() {
         let app = App::new(HomConfig::default());
         let (layout, panes) = app.session_snapshot().unwrap();
-        assert!(!layout.is_empty());
+        let parsed_layout: LayoutKind = serde_json::from_str(&layout).unwrap();
+        assert_eq!(parsed_layout, LayoutKind::default());
         let parsed: Vec<SessionPaneConfig> = serde_json::from_str(&panes).unwrap();
         assert!(parsed.is_empty());
     }
 
-    #[test]
-    fn test_shutdown_clears_state() {
+    #[tokio::test]
+    async fn test_shutdown_clears_state_and_resolves_pending_completions() {
         let mut app = App::new(HomConfig::default());
+        let (reply, rx) = oneshot::channel();
+        app.pending_completions.push(PendingCompletion {
+            pane_id: 42,
+            reply,
+            started: Instant::now(),
+            timeout: Duration::from_secs(10),
+        });
         app.shutdown();
         assert!(app.panes.is_empty());
         assert!(app.pane_order.is_empty());
         assert!(app.pending_completions.is_empty());
+        let err = rx.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("shutting down"));
     }
 
     #[test]

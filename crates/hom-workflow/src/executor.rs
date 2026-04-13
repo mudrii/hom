@@ -926,7 +926,7 @@ steps:
         assert_eq!(result.step_results["plan"].status, StepStatus::Failed);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_exhaustion_marks_step_failed_after_last_attempt() {
         let yaml = r#"
 name: retry-failure
@@ -941,10 +941,14 @@ steps:
         let def = WorkflowDef::from_yaml(yaml).unwrap();
         let executor = WorkflowExecutor::new();
 
-        let result = executor
-            .execute(&def, Arc::new(AlwaysFailRuntime), HashMap::new())
-            .await
-            .unwrap();
+        let task = tokio::spawn(async move {
+            executor
+                .execute(&def, Arc::new(AlwaysFailRuntime), HashMap::new())
+                .await
+                .unwrap()
+        });
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let result = task.await.unwrap();
 
         let step = &result.step_results["plan"];
         assert_eq!(step.status, StepStatus::Failed);
@@ -1041,7 +1045,7 @@ steps:
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn fallback_step_duration_is_measured_from_fallback_start() {
         let yaml = r#"
 name: fallback-duration
@@ -1058,10 +1062,14 @@ steps:
         let def = WorkflowDef::from_yaml(yaml).unwrap();
         let executor = WorkflowExecutor::new();
 
-        let result = executor
-            .execute(&def, Arc::new(FallbackRuntime), HashMap::new())
-            .await
-            .unwrap();
+        let task = tokio::spawn(async move {
+            executor
+                .execute(&def, Arc::new(FallbackRuntime), HashMap::new())
+                .await
+                .unwrap()
+        });
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let result = task.await.unwrap();
 
         let primary = &result.step_results["plan"];
         let fallback = &result.step_results["recover"];
